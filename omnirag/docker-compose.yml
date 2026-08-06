@@ -1,0 +1,48 @@
+# Phase 2: `backend` + `postgres` are real. Redis/Qdrant/worker/frontend are
+# added for real, one at a time, as each later phase needs them.
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: omnirag
+      POSTGRES_PASSWORD: omnirag
+      POSTGRES_DB: omnirag
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U omnirag"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    env_file:
+      - ./backend/.env
+    environment:
+      # Overrides .env's `localhost` — inside Compose's network, the DB is
+      # reachable at the service name `postgres`, not localhost.
+      DATABASE_URL: postgresql+asyncpg://omnirag:omnirag@postgres:5432/omnirag
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+    command: >
+      sh -c "alembic upgrade head &&
+             uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+
+  # redis:           # added in Phase 4
+  # qdrant:          # added in Phase 6
+  # worker:          # added in Phase 4 (Celery worker)
+  # frontend:        # added in Phase 17
+
+volumes:
+  postgres_data:

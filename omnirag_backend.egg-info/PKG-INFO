@@ -1,0 +1,5 @@
+Metadata-Version: 2.4
+Name: omnirag-backend
+Version: 0.1.0
+Summary: OmniRAG — Multi-Modal AI Knowledge Assistant (backend)
+Requires-Python: >=3.11

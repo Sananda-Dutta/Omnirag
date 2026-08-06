@@ -1,0 +1,142 @@
+# OmniRAG — Multi-Modal AI Knowledge Assistant
+
+A production-oriented, portfolio-grade RAG system: upload PDFs, DOCX, images,
+and URLs, then ask questions and get citation-backed answers.
+
+This repo is being built **in phases**. Each phase is a real, working
+increment — nothing is stubbed out and left broken. See `PHASES.md` (added
+once we're past a couple of phases) for what's implemented vs planned.
+
+## Current status: Phase 3 — Authentication
+
+What exists right now:
+- **Phase 1**: FastAPI skeleton, structured logging, config, package layout, Docker.
+- **Phase 2**: Async SQLAlchemy, `User`/`KnowledgeBase` models, Alembic, DB-aware health check.
+- **Phase 3** (new):
+  - `app/core/security.py` — bcrypt password hashing, HS256 JWT issuance/verification
+  - `POST /api/v1/auth/register`, `POST /api/v1/auth/login` (OAuth2 form login —
+    works with Swagger's "Authorize" button out of the box), `GET /api/v1/auth/me`
+  - `get_current_user` dependency (`app/core/deps.py`) — the chokepoint every
+    user-scoped endpoint from Phase 4 onward will depend on
+  - App refuses to boot in `production` if `SECRET_KEY` is still the default placeholder
+  - **Timing side-channel found and fixed**: `authenticate_user` originally
+    returned near-instantly for an unknown email but took ~270ms (one bcrypt
+    call) for a known email with a wrong password — an attacker could
+    enumerate registered emails purely from response time. Fixed by always
+    running a bcrypt comparison (against a dummy hash when no user exists),
+    with a regression test (`tests/test_auth_timing.py`) guarding it
+  - 17 tests total: registration, login, protected-route access, expired
+    tokens, tokens signed with the wrong secret, and the timing fix
+
+What's deliberately **not** here yet: document ingestion (Phase 4),
+embeddings, vector search, LLM calls, the agent layer, the frontend.
+
+## Architecture (why the folders look like this)
+
+```
+backend/app/
+├── api/          # HTTP routes only — no business logic
+├── core/         # config, logging, security primitives
+├── models/       # SQLAlchemy ORM models          (Phase 2)
+├── schemas/      # Pydantic request/response models (Phase 2)
+├── services/     # orchestration logic that routes call
+├── rag/          # the RAG pipeline itself           (Phase 7+)
+├── embeddings/   # EmbeddingProvider abstraction      (Phase 5)
+├── llm/          # LLMProvider abstraction             (Phase 7)
+├── agents/       # tool-calling agent layer           (Phase 13)
+├── ingestion/     # document parsing/chunking pipeline  (Phase 4-5)
+├── retrieval/    # hybrid search + re-ranking          (Phase 8)
+├── evaluation/   # RAG eval harness                    (Phase 15)
+├── database/     # SQLAlchemy engine/session mgmt      (Phase 2)
+└── utils/        # small shared helpers
+```
+
+Routers stay thin; all real logic lives in `services/` or the domain
+packages (`rag/`, `llm/`, etc.). This is what lets us swap a vector DB or add
+a new LLM provider later without touching the API layer.
+
+## Running Phase 2
+
+### Option A: Docker (simplest — Postgres + backend + migrations, all wired up)
+
+```bash
+cp backend/.env.example backend/.env
+docker compose up --build
+```
+
+The backend container runs `alembic upgrade head` automatically before
+starting the server.
+
+### Option B: Local Postgres
+
+```bash
+# 1. Create the dev + test databases
+createuser omnirag -P            # password: omnirag
+createdb omnirag -O omnirag
+createdb omnirag_test -O omnirag
+
+# 2. Set up the backend
+cd backend
+python3 -m venv .venv
+. .venv/bin/activate             # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+cp .env.example .env             # defaults match the DB created above
+
+# 3. Apply migrations
+alembic upgrade head
+
+# 4. Run
+uvicorn app.main:app --reload
+```
+
+Then:
+- `GET http://localhost:8000/api/v1/health` → `{"status": "ok", "checks": {"database": "ok"}, ...}`
+  (returns HTTP 503 + `"status": "degraded"` if Postgres is unreachable)
+- `GET http://localhost:8000/docs` → interactive Swagger UI — click
+  "Authorize" and log in with a registered user to try protected endpoints
+  directly from the docs
+
+Try the auth flow from the command line:
+
+```bash
+curl -X POST localhost:8000/api/v1/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"email":"you@example.com","password":"a-real-password"}'
+
+curl -X POST localhost:8000/api/v1/auth/login \
+  -d "username=you@example.com&password=a-real-password"
+# -> {"access_token": "...", "token_type": "bearer"}
+
+curl localhost:8000/api/v1/auth/me -H "Authorization: Bearer <token>"
+```
+
+### Tests
+
+Tests run against the separate `omnirag_test` database (never the dev one):
+
+```bash
+cd backend
+. .venv/bin/activate
+pytest tests/ -v
+```
+
+### Working with migrations
+
+```bash
+# After changing/adding a model in app/models/:
+alembic revision --autogenerate -m "describe the change"
+alembic upgrade head
+```
+
+Always review an autogenerated migration before applying it — Alembic is
+good but not infallible, especially around column type changes and renames
+(it sees a rename as a drop + add unless you edit the migration by hand).
+
+## Next phase
+
+**Phase 4: Document ingestion** — file upload endpoint, validation (type/size
+limits), background processing so uploads don't block the API, and the
+`documents` table. This is the first phase that writes data a real user
+actually cares about (as opposed to auth plumbing), so it's also where
+per-user isolation (`get_current_user` + `owner_id` filtering) gets used for
+real for the first time.

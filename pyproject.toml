@@ -1,0 +1,22 @@
+[project]
+name = "omnirag-backend"
+version = "0.1.0"
+description = "OmniRAG — Multi-Modal AI Knowledge Assistant (backend)"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# NOTE: no async tests yet, so pytest-asyncio isn't a dependency. Phase 2
+# (async SQLAlchemy) will add `pytest-asyncio` and `asyncio_mode = "auto"`
+# here at the same time it adds the first async test.
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
