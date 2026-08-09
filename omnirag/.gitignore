@@ -11,6 +11,9 @@ venv/
 .env
 *.env.local
 
+# Uploaded files (local disk storage — Phase 4)
+backend/uploads/
+
 # Node / frontend (Phase 17+)
 node_modules/
 dist/

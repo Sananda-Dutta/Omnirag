@@ -53,8 +53,13 @@ class Settings(BaseSettings):
     # --- Vector DB (wired up in Phase 6) ---
     VECTOR_DB_URL: str = Field(default="http://localhost:6333")
 
-    # --- Redis / background jobs (wired up in Phase 4) ---
+    # --- Redis / background jobs (used starting Phase 4) ---
     REDIS_URL: str = Field(default="redis://localhost:6379/0")
+
+    # --- File storage / ingestion (Phase 4) ---
+    UPLOAD_DIR: str = Field(default="./uploads")
+    MAX_UPLOAD_SIZE_MB: int = Field(default=25)
+    ALLOWED_UPLOAD_EXTENSIONS: tuple[str, ...] = (".pdf", ".docx", ".txt", ".md")
 
     # --- Auth (wired up in Phase 3) ---
     SECRET_KEY: str = Field(
@@ -75,6 +80,10 @@ class Settings(BaseSettings):
     @property
     def is_production(self) -> bool:
         return self.APP_ENV == "production"
+
+    @property
+    def max_upload_size_bytes(self) -> int:
+        return self.MAX_UPLOAD_SIZE_MB * 1024 * 1024
 
 
 @lru_cache

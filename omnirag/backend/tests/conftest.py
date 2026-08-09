@@ -21,6 +21,7 @@ check).
 """
 
 from collections.abc import AsyncGenerator
+from pathlib import Path
 
 import pytest
 import pytest_asyncio
@@ -69,3 +70,67 @@ async def client(db_session: AsyncSession) -> AsyncGenerator[AsyncClient, None]:
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac
     app.dependency_overrides.clear()
+
+
+@pytest.fixture(scope="module")
+def celery_worker():
+    """
+    A real Celery worker subprocess, for tests that need to prove ingestion
+    actually works end-to-end (Redis broker -> worker process -> DB write),
+    not just that the task function is correct in isolation.
+
+    Started with DATABASE_URL pointed at the test DB explicitly: a subprocess
+    has no access to the in-process `client` fixture's dependency override,
+    so it needs its own, matching env var to read/write the same rows the
+    test's API calls created.
+    """
+    import os
+    import subprocess
+    import time
+
+    env = os.environ.copy()
+    env["DATABASE_URL"] = TEST_DATABASE_URL
+    # REDIS_URL deliberately left as-is: the worker must share the same
+    # broker this test process enqueues tasks on via the API.
+
+    proc = subprocess.Popen(
+        [
+            "celery",
+            "-A",
+            "app.workers.celery_app",
+            "worker",
+            "--loglevel=info",
+            "--concurrency=1",
+            "--without-heartbeat",
+            "--without-gossip",
+        ],
+        cwd=str(Path(__file__).resolve().parents[1]),
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+
+    started = time.time()
+    ready = False
+    lines: list[str] = []
+    while time.time() - started < 20:
+        line = proc.stdout.readline()
+        if not line:
+            continue
+        lines.append(line)
+        if "ready" in line.lower():
+            ready = True
+            break
+
+    if not ready:
+        proc.terminate()
+        raise RuntimeError("Celery worker did not become ready in time:\n" + "".join(lines))
+
+    yield proc
+
+    proc.terminate()
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        proc.kill()

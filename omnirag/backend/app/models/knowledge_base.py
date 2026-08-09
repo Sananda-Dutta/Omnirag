@@ -29,6 +29,9 @@ class KnowledgeBase(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     )
 
     owner: Mapped["User"] = relationship(back_populates="knowledge_bases")
+    documents: Mapped[list["Document"]] = relationship(
+        back_populates="knowledge_base", cascade="all, delete-orphan"
+    )
 
     def __repr__(self) -> str:
         return f"<KnowledgeBase id={self.id} name={self.name!r} owner_id={self.owner_id}>"

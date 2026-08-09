@@ -8,6 +8,7 @@ pydantic-settings==2.7.1
 pytest==8.3.4
 httpx==0.28.1
 pytest-asyncio==0.25.2
+reportlab==4.2.5   # test-only: generates real PDFs with actual text content, to test extraction against
 
 # --- Phase 2: database ---
 sqlalchemy[asyncio]==2.0.36
@@ -20,8 +21,14 @@ pyjwt==2.10.1
 python-multipart==0.0.20  # required by FastAPI's OAuth2PasswordRequestForm (login form parsing)
 email-validator==2.2.0    # required by pydantic's EmailStr
 
-# NOTE: qdrant-client, celery, redis, openai, anthropic, google-generativeai
-# etc. are intentionally NOT listed yet. They get added in the phase that
-# actually introduces them (Phase 4 workers, Phase 6 vector DB, Phase 7 LLM
-# providers) so requirements.txt always reflects what the code at that point
-# in history actually uses.
+# --- Phase 4: document ingestion ---
+celery==5.4.0
+redis==5.2.1
+pypdf==5.1.0
+python-docx==1.1.2
+
+# NOTE: qdrant-client, openai, anthropic, google-generativeai etc. are
+# intentionally NOT listed yet. They get added in the phase that actually
+# introduces them (Phase 6 vector DB, Phase 7 LLM providers) so
+# requirements.txt always reflects what the code at that point in history
+# actually uses.

@@ -7,29 +7,48 @@ This repo is being built **in phases**. Each phase is a real, working
 increment — nothing is stubbed out and left broken. See `PHASES.md` (added
 once we're past a couple of phases) for what's implemented vs planned.
 
-## Current status: Phase 3 — Authentication
+## Current status: Phase 4 — Document Ingestion
 
 What exists right now:
 - **Phase 1**: FastAPI skeleton, structured logging, config, package layout, Docker.
 - **Phase 2**: Async SQLAlchemy, `User`/`KnowledgeBase` models, Alembic, DB-aware health check.
-- **Phase 3** (new):
-  - `app/core/security.py` — bcrypt password hashing, HS256 JWT issuance/verification
-  - `POST /api/v1/auth/register`, `POST /api/v1/auth/login` (OAuth2 form login —
-    works with Swagger's "Authorize" button out of the box), `GET /api/v1/auth/me`
-  - `get_current_user` dependency (`app/core/deps.py`) — the chokepoint every
-    user-scoped endpoint from Phase 4 onward will depend on
-  - App refuses to boot in `production` if `SECRET_KEY` is still the default placeholder
-  - **Timing side-channel found and fixed**: `authenticate_user` originally
-    returned near-instantly for an unknown email but took ~270ms (one bcrypt
-    call) for a known email with a wrong password — an attacker could
-    enumerate registered emails purely from response time. Fixed by always
-    running a bcrypt comparison (against a dummy hash when no user exists),
-    with a regression test (`tests/test_auth_timing.py`) guarding it
-  - 17 tests total: registration, login, protected-route access, expired
-    tokens, tokens signed with the wrong secret, and the timing fix
+- **Phase 3**: bcrypt + JWT auth, `get_current_user`, timing side-channel fix.
+- **Phase 4** (new):
+  - `KnowledgeBase` CRUD (`POST/GET/DELETE /api/v1/knowledge-bases`) and
+    `Document` upload/list/get/delete, all enforcing per-user ownership at
+    the query level (404, never 403 — see `knowledge_base_service.py`)
+  - File upload with real validation (extension allowlist, size limit) —
+    `413`/`415` on rejection, checked *before* anything touches disk or the DB
+  - `StorageBackend` abstraction (`app/ingestion/storage.py`) — local disk
+    now, swappable for S3 later without touching callers; on-disk filenames
+    are server-generated, never derived from client input (path-traversal
+    protection)
+  - Text extraction for PDF/DOCX/TXT/MD (`app/ingestion/extractors.py`),
+    each format raising a clean `ExtractionError` a user can act on
+    (e.g. "PDF is password-protected") instead of leaking a library traceback
+  - **Real background processing**: Celery + Redis. Upload returns
+    immediately with `status: pending`; a separate worker process extracts
+    the text and updates the row through `processing` → `completed`/`failed`
+  - `docker-compose.yml` now runs `postgres`, `redis`, `backend`, and a
+    dedicated `worker` service
 
-What's deliberately **not** here yet: document ingestion (Phase 4),
-embeddings, vector search, LLM calls, the agent layer, the frontend.
+**Bug found and fixed this phase**: `/knowledge-bases/{id}` and related
+routes originally typed the path param as `str`, so a malformed UUID
+reached the database layer and crashed with a raw, unhandled 500 (full
+asyncpg stack trace in the response). Fixed by typing path params as
+`uuid.UUID` so FastAPI validates and rejects with a clean 422 before the
+request ever reaches a query.
+
+**Testing**: 39 tests total. Ingestion is tested genuinely end-to-end —
+real generated PDFs (via reportlab) and DOCX files (via python-docx), a
+real Celery worker subprocess consuming from a real Redis broker and
+writing to the real test Postgres database, polled through the actual HTTP
+API until processing completes. Not mocked at any layer.
+
+What's deliberately **not** here yet: chunking and embeddings (Phase 5),
+vector search (Phase 6), LLM calls, the agent layer, the frontend. OCR for
+scanned/image-only PDFs is explicitly out of scope for now — extraction
+fails cleanly with a message saying so, rather than returning blank text.
 
 ## Architecture (why the folders look like this)
 
@@ -96,23 +115,43 @@ Then:
   "Authorize" and log in with a registered user to try protected endpoints
   directly from the docs
 
-Try the auth flow from the command line:
+Try the full flow from the command line:
 
 ```bash
 curl -X POST localhost:8000/api/v1/auth/register \
   -H "Content-Type: application/json" \
   -d '{"email":"you@example.com","password":"a-real-password"}'
 
-curl -X POST localhost:8000/api/v1/auth/login \
-  -d "username=you@example.com&password=a-real-password"
-# -> {"access_token": "...", "token_type": "bearer"}
+TOKEN=$(curl -s -X POST localhost:8000/api/v1/auth/login \
+  -d "username=you@example.com&password=a-real-password" | python3 -c "import sys,json;print(json.load(sys.stdin)['access_token'])")
 
-curl localhost:8000/api/v1/auth/me -H "Authorization: Bearer <token>"
+KB_ID=$(curl -s -X POST localhost:8000/api/v1/knowledge-bases \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"name":"ML coursework"}' | python3 -c "import sys,json;print(json.load(sys.stdin)['id'])")
+
+curl -X POST "localhost:8000/api/v1/knowledge-bases/$KB_ID/documents" \
+  -H "Authorization: Bearer $TOKEN" -F "file=@/path/to/some.pdf"
+# -> {"status": "pending", ...} — poll GET /api/v1/documents/{id} to watch
+# it move to "processing" then "completed" (or "failed" with a reason)
 ```
+
+### Running the background worker (required for uploads to actually process)
+
+```bash
+cd backend
+. .venv/bin/activate
+celery -A app.workers.celery_app worker --loglevel=info
+```
+
+Without a worker running, uploads succeed and sit in `status: pending`
+forever — the API and the worker are deliberately decoupled, so this is
+expected, not a bug (Redis holds the queued task until something consumes it).
 
 ### Tests
 
-Tests run against the separate `omnirag_test` database (never the dev one):
+Tests run against the separate `omnirag_test` database (never the dev one).
+The document-ingestion tests spin up a real Celery worker subprocess
+automatically — no manual worker needed to run the suite:
 
 ```bash
 cd backend
@@ -134,9 +173,8 @@ good but not infallible, especially around column type changes and renames
 
 ## Next phase
 
-**Phase 4: Document ingestion** — file upload endpoint, validation (type/size
-limits), background processing so uploads don't block the API, and the
-`documents` table. This is the first phase that writes data a real user
-actually cares about (as opposed to auth plumbing), so it's also where
-per-user isolation (`get_current_user` + `owner_id` filtering) gets used for
-real for the first time.
+**Phase 5: Chunking + embeddings** — splitting `extracted_text` into
+overlapping chunks, a configurable `EmbeddingProvider` abstraction (so the
+embedding model isn't hard-coded to one vendor), and a `document_chunks`
+table. This is the last phase before Phase 6 gives those chunks somewhere
+to actually live for retrieval (a vector database).

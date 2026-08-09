@@ -1,5 +1,5 @@
-# Phase 2: `backend` + `postgres` are real. Redis/Qdrant/worker/frontend are
-# added for real, one at a time, as each later phase needs them.
+# Phase 4: `backend` + `postgres` + `redis` + `worker` are all real now.
+# Qdrant/frontend are added for real in their own later phases.
 
 services:
   postgres:
@@ -18,6 +18,16 @@ services:
       timeout: 5s
       retries: 5
 
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
   backend:
     build:
       context: ./backend
@@ -27,22 +37,48 @@ services:
     env_file:
       - ./backend/.env
     environment:
-      # Overrides .env's `localhost` — inside Compose's network, the DB is
-      # reachable at the service name `postgres`, not localhost.
+      # Overrides .env's `localhost` — inside Compose's network, dependencies
+      # are reachable by service name, not localhost.
       DATABASE_URL: postgresql+asyncpg://omnirag:omnirag@postgres:5432/omnirag
+      REDIS_URL: redis://redis:6379/0
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     volumes:
       - ./backend:/app
+      - upload_data:/app/uploads
     command: >
       sh -c "alembic upgrade head &&
              uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
 
-  # redis:           # added in Phase 4
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    env_file:
+      - ./backend/.env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://omnirag:omnirag@postgres:5432/omnirag
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+      # Shared with `backend` so the worker can read files the API saved to
+      # disk. This shared-volume dependency is exactly the kind of coupling
+      # that goes away when Phase 20 swaps LocalStorage for S3 — both
+      # containers would talk to S3 directly instead of a shared filesystem.
+      - upload_data:/app/uploads
+    command: celery -A app.workers.celery_app worker --loglevel=info
+
   # qdrant:          # added in Phase 6
-  # worker:          # added in Phase 4 (Celery worker)
   # frontend:        # added in Phase 17
 
 volumes:
   postgres_data:
+  upload_data:
