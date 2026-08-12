@@ -122,3 +122,17 @@ async def delete_document(db: AsyncSession, owner_id: uuid.UUID, document_id: uu
     get_storage_backend().delete(document.storage_path)
     await db.delete(document)
     await db.commit()
+
+
+async def list_chunks(
+    db: AsyncSession, owner_id: uuid.UUID, document_id: uuid.UUID
+) -> list["DocumentChunk"]:
+    from app.models.document_chunk import DocumentChunk
+
+    await get_document(db, owner_id, document_id)  # ownership check; raises DocumentNotFoundError
+    result = await db.execute(
+        select(DocumentChunk)
+        .where(DocumentChunk.document_id == document_id)
+        .order_by(DocumentChunk.chunk_index)
+    )
+    return list(result.scalars().all())

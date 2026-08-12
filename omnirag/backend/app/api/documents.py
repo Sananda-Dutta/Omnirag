@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.deps import get_current_user
 from app.database.session import get_db
 from app.models.user import User
+from app.schemas.chunk import ChunkRead
 from app.schemas.document import DocumentDetail, DocumentRead
 from app.services.document_service import (
     DocumentNotFoundError,
@@ -29,6 +30,7 @@ from app.services.document_service import (
     UnsupportedFileTypeError,
     delete_document,
     get_document,
+    list_chunks,
     list_documents,
     upload_document,
 )
@@ -88,6 +90,18 @@ async def get_one(
 ):
     try:
         return await get_document(db, current_user.id, document_id)
+    except DocumentNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND) from exc
+
+
+@router.get("/documents/{document_id}/chunks", response_model=list[ChunkRead])
+async def list_document_chunks(
+    document_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        return await list_chunks(db, current_user.id, document_id)
     except DocumentNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND) from exc
 

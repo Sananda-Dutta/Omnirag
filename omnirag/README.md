@@ -7,48 +7,55 @@ This repo is being built **in phases**. Each phase is a real, working
 increment — nothing is stubbed out and left broken. See `PHASES.md` (added
 once we're past a couple of phases) for what's implemented vs planned.
 
-## Current status: Phase 4 — Document Ingestion
+## Current status: Phase 5 — Chunking + Embeddings
 
 What exists right now:
 - **Phase 1**: FastAPI skeleton, structured logging, config, package layout, Docker.
 - **Phase 2**: Async SQLAlchemy, `User`/`KnowledgeBase` models, Alembic, DB-aware health check.
 - **Phase 3**: bcrypt + JWT auth, `get_current_user`, timing side-channel fix.
-- **Phase 4** (new):
-  - `KnowledgeBase` CRUD (`POST/GET/DELETE /api/v1/knowledge-bases`) and
-    `Document` upload/list/get/delete, all enforcing per-user ownership at
-    the query level (404, never 403 — see `knowledge_base_service.py`)
-  - File upload with real validation (extension allowlist, size limit) —
-    `413`/`415` on rejection, checked *before* anything touches disk or the DB
-  - `StorageBackend` abstraction (`app/ingestion/storage.py`) — local disk
-    now, swappable for S3 later without touching callers; on-disk filenames
-    are server-generated, never derived from client input (path-traversal
-    protection)
-  - Text extraction for PDF/DOCX/TXT/MD (`app/ingestion/extractors.py`),
-    each format raising a clean `ExtractionError` a user can act on
-    (e.g. "PDF is password-protected") instead of leaking a library traceback
-  - **Real background processing**: Celery + Redis. Upload returns
-    immediately with `status: pending`; a separate worker process extracts
-    the text and updates the row through `processing` → `completed`/`failed`
-  - `docker-compose.yml` now runs `postgres`, `redis`, `backend`, and a
-    dedicated `worker` service
+- **Phase 4**: Upload/validate/store/extract pipeline, real Celery + Redis
+  background processing, `413`/`415`/`404` handled correctly.
+- **Phase 5** (new):
+  - Boundary-aware recursive text chunker (`app/ingestion/chunking.py`) —
+    tries paragraph, then sentence, then word breaks before ever falling
+    back to a hard character cut; configurable `CHUNK_SIZE`/`CHUNK_OVERLAP`
+  - `EmbeddingProvider` interface (`app/embeddings/base.py`) with two real
+    implementations: `LocalHashingEmbeddingProvider` (feature hashing —
+    deterministic, no network/API key, the sandbox-runnable default) and
+    `OpenAIEmbeddingProvider` (real implementation of OpenAI's actual API
+    shape, but only testable here against a mocked HTTP layer — this
+    environment has no egress to `api.openai.com`, stated plainly rather
+    than glossed over)
+  - `document_chunks` table storing chunk text + a raw float-array
+    embedding + which model produced it — a plain Postgres array for now,
+    not yet an ANN index (that's explicitly Phase 6's job)
+  - The Celery task now chunks and embeds after extraction; `status:
+    completed` means the document is actually searchable, not merely that
+    text was recovered from the file
+  - `GET /api/v1/documents/{id}/chunks` to inspect chunks (embeddings
+    themselves are never returned over the API — no client use case for
+    shipping a 384-element float array)
 
-**Bug found and fixed this phase**: `/knowledge-bases/{id}` and related
-routes originally typed the path param as `str`, so a malformed UUID
-reached the database layer and crashed with a raw, unhandled 500 (full
-asyncpg stack trace in the response). Fixed by typing path params as
-`uuid.UUID` so FastAPI validates and rejects with a clean 422 before the
-request ever reaches a query.
+**Two real bugs found and fixed this phase, not just in theory:**
+1. `sqlalchemy.exc.MissingGreenlet` crash on every upload — `document.chunks.clear()`
+   (used for idempotent reprocessing) needed the `chunks` relationship
+   already loaded; async SQLAlchemy can't perform an implicit lazy-load
+   outside a greenlet context. Fixed by eager-loading it alongside
+   `knowledge_base`, verified live: task went from crashing to completing
+   in ~0.2s.
+2. A genuine Postgres deadlock between a test's `DROP TABLE` teardown and a
+   still-in-flight Celery worker transaction on the same tables. Fixed by
+   waiting for terminal status before the test ends; confirmed stable
+   across repeated runs, not just one lucky pass.
 
-**Testing**: 39 tests total. Ingestion is tested genuinely end-to-end —
-real generated PDFs (via reportlab) and DOCX files (via python-docx), a
-real Celery worker subprocess consuming from a real Redis broker and
-writing to the real test Postgres database, polled through the actual HTTP
-API until processing completes. Not mocked at any layer.
+**Testing**: 62 tests total. The local embedding provider is tested for
+real, including a semantic-similarity check (texts sharing vocabulary embed
+closer together than unrelated ones) — the actual property that matters for
+retrieval, not just "does it return a vector."
 
-What's deliberately **not** here yet: chunking and embeddings (Phase 5),
-vector search (Phase 6), LLM calls, the agent layer, the frontend. OCR for
-scanned/image-only PDFs is explicitly out of scope for now — extraction
-fails cleanly with a message saying so, rather than returning blank text.
+What's deliberately **not** here yet: a real ANN vector index (Phase 6 —
+similarity search against the current `document_chunks.embedding` column
+would require a full table scan), LLM calls, the agent layer, the frontend.
 
 ## Architecture (why the folders look like this)
 
@@ -60,10 +67,10 @@ backend/app/
 ├── schemas/      # Pydantic request/response models (Phase 2)
 ├── services/     # orchestration logic that routes call
 ├── rag/          # the RAG pipeline itself           (Phase 7+)
-├── embeddings/   # EmbeddingProvider abstraction      (Phase 5)
+├── embeddings/   # EmbeddingProvider abstraction      (Phase 5 — done)
 ├── llm/          # LLMProvider abstraction             (Phase 7)
 ├── agents/       # tool-calling agent layer           (Phase 13)
-├── ingestion/     # document parsing/chunking pipeline  (Phase 4-5)
+├── ingestion/     # document parsing/chunking pipeline  (Phase 4-5 — done)
 ├── retrieval/    # hybrid search + re-ranking          (Phase 8)
 ├── evaluation/   # RAG eval harness                    (Phase 15)
 ├── database/     # SQLAlchemy engine/session mgmt      (Phase 2)
@@ -74,7 +81,7 @@ Routers stay thin; all real logic lives in `services/` or the domain
 packages (`rag/`, `llm/`, etc.). This is what lets us swap a vector DB or add
 a new LLM provider later without touching the API layer.
 
-## Running Phase 2
+## Running the project
 
 ### Option A: Docker (simplest — Postgres + backend + migrations, all wired up)
 
@@ -147,6 +154,26 @@ Without a worker running, uploads succeed and sit in `status: pending`
 forever — the API and the worker are deliberately decoupled, so this is
 expected, not a bug (Redis holds the queued task until something consumes it).
 
+### Switching embedding providers
+
+`EMBEDDING_PROVIDER=local` (the default) needs nothing extra and is what
+lets this whole pipeline run without any API key. To use real semantic
+embeddings instead:
+
+```bash
+# in backend/.env
+EMBEDDING_PROVIDER=openai
+EMBEDDING_DIMENSION=1536
+OPENAI_API_KEY=sk-...
+```
+
+Note this hasn't been exercised against the live OpenAI API as part of
+building this project — this sandboxed dev environment has no network
+access to `api.openai.com`. The implementation follows OpenAI's documented
+embeddings API exactly and is unit-tested against a mocked HTTP layer
+(`tests/test_embeddings.py`), but "should work" and "verified live" are
+different claims, and only the first one is true right now.
+
 ### Tests
 
 Tests run against the separate `omnirag_test` database (never the dev one).
@@ -173,8 +200,9 @@ good but not infallible, especially around column type changes and renames
 
 ## Next phase
 
-**Phase 5: Chunking + embeddings** — splitting `extracted_text` into
-overlapping chunks, a configurable `EmbeddingProvider` abstraction (so the
-embedding model isn't hard-coded to one vendor), and a `document_chunks`
-table. This is the last phase before Phase 6 gives those chunks somewhere
-to actually live for retrieval (a vector database).
+**Phase 6: Vector database** — standing up Qdrant (or pgvector), migrating
+`document_chunks.embedding` into a real ANN index, and a similarity-search
+service that queries it with per-user/per-knowledge-base filtering. This is
+what turns "we have embeddings sitting in a Postgres array" into "we can
+actually retrieve the right chunk for a query in production," and is the
+last piece needed before Phase 7 (basic RAG) can generate a grounded answer.

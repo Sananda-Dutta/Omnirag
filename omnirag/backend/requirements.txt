@@ -27,8 +27,10 @@ redis==5.2.1
 pypdf==5.1.0
 python-docx==1.1.2
 
-# NOTE: qdrant-client, openai, anthropic, google-generativeai etc. are
-# intentionally NOT listed yet. They get added in the phase that actually
-# introduces them (Phase 6 vector DB, Phase 7 LLM providers) so
-# requirements.txt always reflects what the code at that point in history
-# actually uses.
+# --- Phase 5: chunking + embeddings ---
+openai==1.58.1  # OpenAIEmbeddingProvider — real implementation, needs OPENAI_API_KEY + network access
+
+# NOTE: qdrant-client, anthropic, google-generativeai etc. are intentionally
+# NOT listed yet. They get added in the phase that actually introduces them
+# (Phase 6 vector DB, Phase 7 LLM providers) so requirements.txt always
+# reflects what the code at that point in history actually uses.

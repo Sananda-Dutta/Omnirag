@@ -61,6 +61,38 @@ class Settings(BaseSettings):
     MAX_UPLOAD_SIZE_MB: int = Field(default=25)
     ALLOWED_UPLOAD_EXTENSIONS: tuple[str, ...] = (".pdf", ".docx", ".txt", ".md")
 
+    # --- Chunking (Phase 5) ---
+    CHUNK_SIZE: int = Field(
+        default=1000,
+        description="Target chunk size in characters. Sized for typical "
+        "embedding-model input limits and retrieval precision — see "
+        "app/ingestion/chunking.py for the full tradeoff explanation.",
+    )
+    CHUNK_OVERLAP: int = Field(
+        default=150,
+        description="Characters of overlap between consecutive chunks, so a "
+        "sentence split across a chunk boundary is still fully readable in "
+        "at least one chunk.",
+    )
+
+    # --- Embeddings (Phase 5) ---
+    EMBEDDING_PROVIDER: Literal["local", "openai"] = Field(
+        default="local",
+        description="'local' needs no network/API key and is what this repo "
+        "can actually run end-to-end in a sandboxed environment. 'openai' is "
+        "a real implementation but needs OPENAI_API_KEY and network access "
+        "to api.openai.com.",
+    )
+    EMBEDDING_DIMENSION: int = Field(
+        default=384,
+        description="Must match the chosen provider's actual output "
+        "dimension (384 for the local provider's default config; 1536 for "
+        "OpenAI text-embedding-3-small). Changing providers without "
+        "updating this — and re-embedding existing chunks — silently "
+        "produces vectors of the wrong shape.",
+    )
+    OPENAI_EMBEDDING_MODEL: str = Field(default="text-embedding-3-small")
+
     # --- Auth (wired up in Phase 3) ---
     SECRET_KEY: str = Field(
         default="CHANGE_ME_IN_PRODUCTION",

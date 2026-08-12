@@ -202,6 +202,51 @@ async def test_upload_rejects_into_someone_elses_knowledge_base(client: AsyncCli
 
 
 @pytest.mark.asyncio
+async def test_chunks_endpoint_returns_real_chunks_with_embeddings(client: AsyncClient, celery_worker):
+    token = await _register_and_login(client, "ingest-chunks@example.com")
+    kb_id = await _create_kb(client, token)
+
+    # Long enough to guarantee more than one chunk at the default 1000-char
+    # chunk size, so this test actually exercises multi-chunk behavior.
+    long_text = "Hybrid search merges dense and sparse retrieval. " * 60
+    files = {"file": ("long.txt", long_text.encode(), "text/plain")}
+    upload = await client.post(
+        f"/api/v1/knowledge-bases/{kb_id}/documents", files=files, headers=_auth(token)
+    )
+    doc_id = upload.json()["id"]
+    await _wait_for_status(client, token, doc_id)
+
+    response = await client.get(f"/api/v1/documents/{doc_id}/chunks", headers=_auth(token))
+    assert response.status_code == 200
+    chunks = response.json()
+
+    assert len(chunks) > 1
+    assert [c["chunk_index"] for c in chunks] == list(range(len(chunks)))
+    for c in chunks:
+        assert c["char_count"] > 0
+        assert c["embedding_model"] == "local-hashing-384d"
+        assert c["embedding_dimension"] == 384
+        assert "embedding" not in c  # never exposed over the API — see schemas/chunk.py
+
+
+@pytest.mark.asyncio
+async def test_user_cannot_list_another_users_document_chunks(client: AsyncClient, celery_worker):
+    token_a = await _register_and_login(client, "ingest-chunkowner@example.com")
+    token_b = await _register_and_login(client, "ingest-chunkintruder@example.com")
+    kb_id = await _create_kb(client, token_a)
+
+    files = {"file": ("notes.txt", b"some private content to chunk", "text/plain")}
+    upload = await client.post(
+        f"/api/v1/knowledge-bases/{kb_id}/documents", files=files, headers=_auth(token_a)
+    )
+    doc_id = upload.json()["id"]
+    await _wait_for_status(client, token_a, doc_id)
+
+    response = await client.get(f"/api/v1/documents/{doc_id}/chunks", headers=_auth(token_b))
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
 async def test_user_cannot_fetch_another_users_document(client: AsyncClient, celery_worker):
     token_a = await _register_and_login(client, "ingest-docowner@example.com")
     token_b = await _register_and_login(client, "ingest-docintruder@example.com")
@@ -215,3 +260,9 @@ async def test_user_cannot_fetch_another_users_document(client: AsyncClient, cel
 
     response = await client.get(f"/api/v1/documents/{doc_id}", headers=_auth(token_b))
     assert response.status_code == 404
+
+    # Let background processing finish before the test (and its table-drop
+    # teardown) ends — a still-in-flight worker transaction racing the
+    # teardown's DROP TABLE against the same tables is a genuine deadlock,
+    # not a hypothetical one (caught during Phase 5 development).
+    await _wait_for_status(client, token_a, doc_id)

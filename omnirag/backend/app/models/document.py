@@ -63,6 +63,13 @@ class Document(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     char_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     knowledge_base: Mapped["KnowledgeBase"] = relationship(back_populates="documents")
+    # cascade="all, delete-orphan": deleting a Document removes its chunks —
+    # correct, since a chunk with no parent document is meaningless. Also
+    # what makes reprocessing idempotent (see workers/tasks.py): clearing
+    # `document.chunks` and re-inserting is safe to run more than once.
+    chunks: Mapped[list["DocumentChunk"]] = relationship(
+        back_populates="document", cascade="all, delete-orphan", order_by="DocumentChunk.chunk_index"
+    )
 
     def __repr__(self) -> str:
         return f"<Document id={self.id} filename={self.filename!r} status={self.status}>"
