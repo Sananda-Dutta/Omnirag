@@ -7,7 +7,7 @@ This repo is being built **in phases**. Each phase is a real, working
 increment — nothing is stubbed out and left broken. See `PHASES.md` (added
 once we're past a couple of phases) for what's implemented vs planned.
 
-## Current status: Phase 5 — Chunking + Embeddings
+## Current status: Phase 6 — Vector Database
 
 What exists right now:
 - **Phase 1**: FastAPI skeleton, structured logging, config, package layout, Docker.
@@ -15,47 +15,57 @@ What exists right now:
 - **Phase 3**: bcrypt + JWT auth, `get_current_user`, timing side-channel fix.
 - **Phase 4**: Upload/validate/store/extract pipeline, real Celery + Redis
   background processing, `413`/`415`/`404` handled correctly.
-- **Phase 5** (new):
-  - Boundary-aware recursive text chunker (`app/ingestion/chunking.py`) —
-    tries paragraph, then sentence, then word breaks before ever falling
-    back to a hard character cut; configurable `CHUNK_SIZE`/`CHUNK_OVERLAP`
-  - `EmbeddingProvider` interface (`app/embeddings/base.py`) with two real
-    implementations: `LocalHashingEmbeddingProvider` (feature hashing —
-    deterministic, no network/API key, the sandbox-runnable default) and
-    `OpenAIEmbeddingProvider` (real implementation of OpenAI's actual API
-    shape, but only testable here against a mocked HTTP layer — this
-    environment has no egress to `api.openai.com`, stated plainly rather
-    than glossed over)
-  - `document_chunks` table storing chunk text + a raw float-array
-    embedding + which model produced it — a plain Postgres array for now,
-    not yet an ANN index (that's explicitly Phase 6's job)
-  - The Celery task now chunks and embeds after extraction; `status:
-    completed` means the document is actually searchable, not merely that
-    text was recovered from the file
-  - `GET /api/v1/documents/{id}/chunks` to inspect chunks (embeddings
-    themselves are never returned over the API — no client use case for
-    shipping a 384-element float array)
+- **Phase 5**: Boundary-aware chunking, `EmbeddingProvider` abstraction
+  (local hashing default + real OpenAI implementation), embeddings
+  persisted alongside chunks.
+- **Phase 6** (new):
+  - `VectorStore` interface (`app/retrieval/vector_store.py`) with a real
+    Qdrant implementation. `owner_id` is a *required* parameter on every
+    search/delete call — not optional — because a filtering bug in a vector
+    store doesn't just leak a list item, it can feed another user's
+    document content straight into a generated answer shown to the wrong
+    person
+  - One Qdrant collection for everyone, isolation enforced via a mandatory
+    payload filter (`owner_id`, optionally narrowed by
+    `knowledge_base_id`) — same pattern the Postgres tables already use,
+    not a collection-per-user design (real per-collection overhead in
+    Qdrant at any meaningful scale)
+  - The Celery task now indexes chunks into Qdrant right after embedding;
+    `status: completed` now means the document is actually searchable end
+    to end, including the ANN index — not just that a row exists in Postgres
+  - `POST /api/v1/search` — embeds the query, searches Qdrant, joins results
+    back to Postgres for the authoritative chunk text (the vector store is
+    never treated as a second source of truth for content)
+  - `DimensionMismatchError` — the app refuses to silently mix vectors from
+    different embedding dimensions/models in one collection if
+    `EMBEDDING_PROVIDER` ever changes
 
-**Two real bugs found and fixed this phase, not just in theory:**
-1. `sqlalchemy.exc.MissingGreenlet` crash on every upload — `document.chunks.clear()`
-   (used for idempotent reprocessing) needed the `chunks` relationship
-   already loaded; async SQLAlchemy can't perform an implicit lazy-load
-   outside a greenlet context. Fixed by eager-loading it alongside
-   `knowledge_base`, verified live: task went from crashing to completing
-   in ~0.2s.
-2. A genuine Postgres deadlock between a test's `DROP TABLE` teardown and a
-   still-in-flight Celery worker transaction on the same tables. Fixed by
-   waiting for terminal status before the test ends; confirmed stable
-   across repeated runs, not just one lucky pass.
+**Real bug found and fixed this phase**: deleting a document cascaded its
+chunks in Postgres but left the corresponding Qdrant vectors behind —
+orphaned points whose `chunk_id` no longer existed anywhere, silently
+corrupting future search results with dead references. Fixed by deleting
+from the vector store *before* the Postgres delete (so a Qdrant failure
+leaves the document intact and retryable, rather than deleted-but-still-
+searchable — the worse of the two failure orderings). Covered by
+`test_deleting_document_removes_it_from_search`.
 
-**Testing**: 62 tests total. The local embedding provider is tested for
-real, including a semantic-similarity check (texts sharing vocabulary embed
-closer together than unrelated ones) — the actual property that matters for
-retrieval, not just "does it return a vector."
+**On infrastructure**: this development sandbox has no Docker access, so
+rather than fake vector search, the real Qdrant 1.12.4 server binary was
+downloaded from its GitHub releases and run directly — every test in this
+phase runs against an actual Qdrant instance doing real HNSW search, not a
+mock or an in-memory stand-in. `docker-compose.yml` runs the official
+`qdrant/qdrant` image for anyone running this normally.
 
-What's deliberately **not** here yet: a real ANN vector index (Phase 6 —
-similarity search against the current `document_chunks.embedding` column
-would require a full table scan), LLM calls, the agent layer, the frontend.
+**Testing**: 76 tests total. Vector store tests cover nearest-neighbor
+ordering, owner isolation, knowledge-base scoping, idempotent upsert, and
+deletion — all against the real server. End-to-end search tests go through
+the full real path (upload → Celery worker → Qdrant → search endpoint) and
+include a genuine relevance check: a "gradient descent" query correctly
+ranks a machine-learning chunk above unrelated cooking/recipe content.
+
+What's deliberately **not** here yet: LLM-generated answers (Phase 7 — this
+phase only returns raw matching chunks, no generation), hybrid/BM25 search
+and re-ranking (Phase 8), the agent layer, the frontend.
 
 ## Architecture (why the folders look like this)
 
@@ -71,7 +81,7 @@ backend/app/
 ├── llm/          # LLMProvider abstraction             (Phase 7)
 ├── agents/       # tool-calling agent layer           (Phase 13)
 ├── ingestion/     # document parsing/chunking pipeline  (Phase 4-5 — done)
-├── retrieval/    # hybrid search + re-ranking          (Phase 8)
+├── retrieval/    # VectorStore + hybrid search/re-ranking (Phase 6 — VectorStore done; hybrid search Phase 8)
 ├── evaluation/   # RAG eval harness                    (Phase 15)
 ├── database/     # SQLAlchemy engine/session mgmt      (Phase 2)
 └── utils/        # small shared helpers
@@ -93,7 +103,7 @@ docker compose up --build
 The backend container runs `alembic upgrade head` automatically before
 starting the server.
 
-### Option B: Local Postgres
+### Option B: Local Postgres + Redis + Qdrant
 
 ```bash
 # 1. Create the dev + test databases
@@ -101,19 +111,35 @@ createuser omnirag -P            # password: omnirag
 createdb omnirag -O omnirag
 createdb omnirag_test -O omnirag
 
-# 2. Set up the backend
+# 2. Run Qdrant (needs Docker, or download the binary directly — see note below)
+docker run -p 6333:6333 -p 6334:6334 -v qdrant_storage:/qdrant/storage qdrant/qdrant:v1.12.4
+
+# 3. Set up the backend
 cd backend
 python3 -m venv .venv
 . .venv/bin/activate             # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-cp .env.example .env             # defaults match the DB created above
+cp .env.example .env             # defaults match the DB/Qdrant created above
 
-# 3. Apply migrations
+# 4. Apply migrations
 alembic upgrade head
 
-# 4. Run
+# 5. Run
 uvicorn app.main:app --reload
 ```
+
+No Docker available? Qdrant ships as a single self-contained binary —
+download the release for your platform from
+[github.com/qdrant/qdrant/releases](https://github.com/qdrant/qdrant/releases)
+and run it directly:
+
+```bash
+tar xzf qdrant-x86_64-unknown-linux-gnu.tar.gz
+QDRANT__STORAGE__STORAGE_PATH=./qdrant_storage ./qdrant
+```
+
+This is exactly how Qdrant was run while building this phase — this dev
+sandbox has no Docker access either.
 
 Then:
 - `GET http://localhost:8000/api/v1/health` → `{"status": "ok", "checks": {"database": "ok"}, ...}`
@@ -140,6 +166,11 @@ curl -X POST "localhost:8000/api/v1/knowledge-bases/$KB_ID/documents" \
   -H "Authorization: Bearer $TOKEN" -F "file=@/path/to/some.pdf"
 # -> {"status": "pending", ...} — poll GET /api/v1/documents/{id} to watch
 # it move to "processing" then "completed" (or "failed" with a reason)
+
+curl -X POST localhost:8000/api/v1/search \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"query":"what does this document say about X?"}'
+# -> ranked chunks with score, text, and which document each came from
 ```
 
 ### Running the background worker (required for uploads to actually process)
@@ -200,9 +231,9 @@ good but not infallible, especially around column type changes and renames
 
 ## Next phase
 
-**Phase 6: Vector database** — standing up Qdrant (or pgvector), migrating
-`document_chunks.embedding` into a real ANN index, and a similarity-search
-service that queries it with per-user/per-knowledge-base filtering. This is
-what turns "we have embeddings sitting in a Postgres array" into "we can
-actually retrieve the right chunk for a query in production," and is the
-last piece needed before Phase 7 (basic RAG) can generate a grounded answer.
+**Phase 7: Basic RAG** — an `LLMProvider` abstraction (mirroring
+`EmbeddingProvider`'s pattern, so the LLM backend isn't hard-coded to one
+vendor), and wiring it to `/search`'s results: retrieve chunks, construct a
+grounded prompt, generate an answer, and return it with citations back to
+the specific chunks/documents used. This is what turns "we can find the
+right chunks" into "we can actually answer the user's question."

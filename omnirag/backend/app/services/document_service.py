@@ -118,8 +118,16 @@ async def get_document(db: AsyncSession, owner_id: uuid.UUID, document_id: uuid.
 
 
 async def delete_document(db: AsyncSession, owner_id: uuid.UUID, document_id: uuid.UUID) -> None:
+    from app.retrieval.factory import get_vector_store
+
     document = await get_document(db, owner_id, document_id)
     get_storage_backend().delete(document.storage_path)
+    # Vector cleanup happens before the DB delete, not after: if it ran
+    # after and the Qdrant call failed, we'd be left with a document
+    # deleted from Postgres but still fully searchable (with dead chunk_ids)
+    # via the vector store — the worse of the two orderings. Failing here
+    # instead leaves the document intact and deletable again on retry.
+    await get_vector_store().delete_by_document(document_id=document_id, owner_id=owner_id)
     await db.delete(document)
     await db.commit()
 

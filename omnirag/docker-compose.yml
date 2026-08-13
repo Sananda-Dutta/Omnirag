@@ -1,9 +1,6 @@
-# Phase 5 adds no new services — chunking and embedding generation happen
-# in-process inside `worker` (the local hashing embedding provider needs no
-# external service; the OpenAI provider, if configured via .env, just needs
-# outbound network access, not a container of its own). `postgres` + `redis`
-# + `backend` + `worker` are all real. Qdrant/frontend are added for real in
-# their own later phases.
+# Phase 6: `qdrant` is real now too. `postgres` + `redis` + `qdrant` +
+# `backend` + `worker` are all real. Frontend is added for real in its own
+# later phase.
 
 services:
   postgres:
@@ -32,6 +29,21 @@ services:
       timeout: 5s
       retries: 5
 
+  qdrant:
+    image: qdrant/qdrant:v1.12.4
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      # Qdrant's image has no curl/wget; a bare TCP connect via /dev/tcp is
+      # enough to confirm the HTTP port is accepting connections.
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/6333' || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
   backend:
     build:
       context: ./backend
@@ -45,10 +57,13 @@ services:
       # are reachable by service name, not localhost.
       DATABASE_URL: postgresql+asyncpg://omnirag:omnirag@postgres:5432/omnirag
       REDIS_URL: redis://redis:6379/0
+      VECTOR_DB_URL: http://qdrant:6333
     depends_on:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      qdrant:
         condition: service_healthy
     volumes:
       - ./backend:/app
@@ -66,10 +81,13 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://omnirag:omnirag@postgres:5432/omnirag
       REDIS_URL: redis://redis:6379/0
+      VECTOR_DB_URL: http://qdrant:6333
     depends_on:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      qdrant:
         condition: service_healthy
     volumes:
       - ./backend:/app
@@ -80,9 +98,9 @@ services:
       - upload_data:/app/uploads
     command: celery -A app.workers.celery_app worker --loglevel=info
 
-  # qdrant:          # added in Phase 6
   # frontend:        # added in Phase 17
 
 volumes:
   postgres_data:
   upload_data:
+  qdrant_data:

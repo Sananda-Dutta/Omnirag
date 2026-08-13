@@ -12,12 +12,13 @@ Status transitions this task is responsible for:
     PENDING (set by the upload endpoint)
       -> PROCESSING (set here, first thing, so a client polling the
          document sees it moved off the queue)
-      -> COMPLETED (extraction succeeded AND chunking+embedding succeeded —
-         "completed" means the document is actually searchable, not merely
-         that text was recovered from the file)
-      -> FAILED (extraction, chunking, or embedding raised; error_message
-         set to something a user can act on where possible, e.g. "PDF is
-         password-protected")
+      -> COMPLETED (extraction succeeded AND chunking+embedding+vector-indexing
+         succeeded — "completed" means the document is actually searchable
+         via the vector store, not merely that text was recovered from the
+         file)
+      -> FAILED (extraction, chunking, embedding, or vector indexing raised;
+         error_message set to something a user can act on where possible,
+         e.g. "PDF is password-protected")
 
 Any exception NOT anticipated by the extractors (a bug, not a bad file) is
 still caught at the top level and recorded as FAILED with a generic message
@@ -34,7 +35,7 @@ duplicate chunks.
 
 import asyncio
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -48,6 +49,7 @@ from app.ingestion.extractors import ExtractionError, extract_text
 from app.ingestion.storage import get_storage_backend
 from app.models.document import Document, DocumentStatus
 from app.models.document_chunk import DocumentChunk
+from app.retrieval.factory import get_vector_store
 from app.workers.celery_app import celery_app
 
 logger = get_logger(__name__)
@@ -121,11 +123,12 @@ async def _run(db: AsyncSession, document_id: UUID) -> None:
 
 
 async def _chunk_and_embed(db: AsyncSession, document: Document) -> None:
-    """Splits document.extracted_text into chunks, embeds each one, and
-    (re)persists them as DocumentChunk rows. Any exception here propagates
-    to _run's except block and marks the document FAILED — a document whose
-    text extracted fine but couldn't be chunked/embedded is not actually
-    usable for retrieval, so COMPLETED must not be reported for it."""
+    """Splits document.extracted_text into chunks, embeds each one,
+    (re)persists them as DocumentChunk rows, and indexes them into the
+    vector store. Any exception here propagates to _run's except block and
+    marks the document FAILED — a document whose text extracted fine but
+    couldn't be chunked/embedded/indexed is not actually usable for
+    retrieval, so COMPLETED must not be reported for it."""
     pieces = chunk_text(
         document.extracted_text or "",
         chunk_size=settings.CHUNK_SIZE,
@@ -135,7 +138,8 @@ async def _chunk_and_embed(db: AsyncSession, document: Document) -> None:
     # Idempotent reprocessing: clear existing chunks before inserting new
     # ones (cascade="all, delete-orphan" on Document.chunks issues the
     # deletes on flush/commit). Safe to run this task more than once for the
-    # same document without accumulating duplicates.
+    # same document without accumulating duplicates. Qdrant upserts below
+    # are separately idempotent too (same point IDs overwrite).
     document.chunks.clear()
 
     if not pieces:
@@ -148,9 +152,13 @@ async def _chunk_and_embed(db: AsyncSession, document: Document) -> None:
     vectors = await provider.embed_texts([piece.text for piece in pieces])
 
     owner_id = document.knowledge_base.owner_id
-    for piece, vector in zip(pieces, vectors):
+    chunk_ids = [uuid4() for _ in pieces]
+
+    for piece, vector, chunk_id in zip(pieces, vectors, chunk_ids):
         document.chunks.append(
             DocumentChunk(
+                id=chunk_id,  # set explicitly (not left to the column default)
+                # so it's known now, before flush, for the Qdrant upsert below.
                 knowledge_base_id=document.knowledge_base_id,
                 owner_id=owner_id,
                 chunk_index=piece.index,
@@ -161,6 +169,16 @@ async def _chunk_and_embed(db: AsyncSession, document: Document) -> None:
                 embedding_dimension=provider.dimension,
             )
         )
+
+    vector_store = get_vector_store()
+    await vector_store.ensure_collection(dimension=provider.dimension)
+    await vector_store.upsert_chunks(
+        chunk_ids=chunk_ids,
+        vectors=vectors,
+        owner_id=owner_id,
+        knowledge_base_id=document.knowledge_base_id,
+        document_id=document.id,
+    )
 
 
 @celery_app.task(name="process_document")

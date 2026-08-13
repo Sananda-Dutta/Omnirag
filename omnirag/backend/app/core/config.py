@@ -52,6 +52,15 @@ class Settings(BaseSettings):
 
     # --- Vector DB (wired up in Phase 6) ---
     VECTOR_DB_URL: str = Field(default="http://localhost:6333")
+    VECTOR_DB_COLLECTION: str = Field(
+        default="document_chunks",
+        description="Qdrant collection name. Single collection for all "
+        "users/knowledge bases — isolation is enforced per-query via a "
+        "mandatory payload filter (owner_id, and optionally "
+        "knowledge_base_id), not by separate collections per user. See "
+        "app/retrieval/qdrant_store.py for why.",
+    )
+    DEFAULT_SEARCH_TOP_K: int = Field(default=5)
 
     # --- Redis / background jobs (used starting Phase 4) ---
     REDIS_URL: str = Field(default="redis://localhost:6379/0")
