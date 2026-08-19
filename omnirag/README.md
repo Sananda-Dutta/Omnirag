@@ -7,7 +7,7 @@ This repo is being built **in phases**. Each phase is a real, working
 increment — nothing is stubbed out and left broken. See `PHASES.md` (added
 once we're past a couple of phases) for what's implemented vs planned.
 
-## Current status: Phase 6 — Vector Database
+## Current status: Phase 7 — Basic RAG
 
 What exists right now:
 - **Phase 1**: FastAPI skeleton, structured logging, config, package layout, Docker.
@@ -18,54 +18,62 @@ What exists right now:
 - **Phase 5**: Boundary-aware chunking, `EmbeddingProvider` abstraction
   (local hashing default + real OpenAI implementation), embeddings
   persisted alongside chunks.
-- **Phase 6** (new):
-  - `VectorStore` interface (`app/retrieval/vector_store.py`) with a real
-    Qdrant implementation. `owner_id` is a *required* parameter on every
-    search/delete call — not optional — because a filtering bug in a vector
-    store doesn't just leak a list item, it can feed another user's
-    document content straight into a generated answer shown to the wrong
-    person
-  - One Qdrant collection for everyone, isolation enforced via a mandatory
-    payload filter (`owner_id`, optionally narrowed by
-    `knowledge_base_id`) — same pattern the Postgres tables already use,
-    not a collection-per-user design (real per-collection overhead in
-    Qdrant at any meaningful scale)
-  - The Celery task now indexes chunks into Qdrant right after embedding;
-    `status: completed` now means the document is actually searchable end
-    to end, including the ANN index — not just that a row exists in Postgres
-  - `POST /api/v1/search` — embeds the query, searches Qdrant, joins results
-    back to Postgres for the authoritative chunk text (the vector store is
-    never treated as a second source of truth for content)
-  - `DimensionMismatchError` — the app refuses to silently mix vectors from
-    different embedding dimensions/models in one collection if
-    `EMBEDDING_PROVIDER` ever changes
+- **Phase 6**: `VectorStore` interface + real Qdrant implementation,
+  `POST /api/v1/search` returning ranked chunks with per-user isolation
+  enforced at the vector-store level.
+- **Phase 7** (new):
+  - `LLMProvider` interface (`app/llm/base.py`) with three implementations:
+    `LocalExtractiveLLMProvider` (the default — real extractive
+    sentence-ranking, zero API key/network needed, so the *entire* RAG
+    pipeline runs end-to-end in this sandbox), `AnthropicLLMProvider`, and
+    `OpenAILLMProvider` (both real implementations of their documented
+    APIs, tested here only against mocked clients — this sandbox can reach
+    `api.anthropic.com` but has no usable API key for either service)
+  - `app/rag/pipeline.py` — the actual RAG orchestration: search → build a
+    labeled, size-capped context block → generate → return citations tied
+    to specific chunks/documents
+  - **A real hallucination-control decision, not just a prompt
+    instruction**: if search returns zero results, the LLM is never called
+    at all. A fixed "not found" response is returned immediately — this is
+    a stronger guarantee than prompting a model not to guess, because the
+    model is never given the chance to
+  - `POST /api/v1/chat` — the end-to-end question-answering endpoint
 
-**Real bug found and fixed this phase**: deleting a document cascaded its
-chunks in Postgres but left the corresponding Qdrant vectors behind —
-orphaned points whose `chunk_id` no longer existed anywhere, silently
-corrupting future search results with dead references. Fixed by deleting
-from the vector store *before* the Postgres delete (so a Qdrant failure
-leaves the document intact and retryable, rather than deleted-but-still-
-searchable — the worse of the two failure orderings). Covered by
-`test_deleting_document_removes_it_from_search`.
+**Two real bugs found and fixed this phase** (both caught by the tests
+written for this phase, not by inspection):
+1. The grounded system prompt's own instructions text said "found in the
+   `<context>` block below" — which put the literal delimiter string inside
+   the prose, colliding with the regex `LocalExtractiveLLMProvider` uses to
+   pull the actual context back out of the prompt. It matched from that
+   prose mention instead of the real tag, pulling half the instructions
+   into the "extracted" answer. Fixed by removing every literal mention of
+   the delimiter syntax from the prompt's prose, keeping the delimiter only
+   where it's actually used.
+2. The extractive provider's relevance scoring counted *any* shared word
+   between question and sentence as "overlap" — including words like "is"
+   and "the". A query about "quantum entanglement" scored a false-positive
+   match against an unrelated sentence about "sunny weather" purely because
+   both contained the word "is". Fixed with a small stopword filter scoped
+   specifically to relevance scoring (the extracted output text itself is
+   untouched — only what counts as "relevant enough to include" changed).
 
-**On infrastructure**: this development sandbox has no Docker access, so
-rather than fake vector search, the real Qdrant 1.12.4 server binary was
-downloaded from its GitHub releases and run directly — every test in this
-phase runs against an actual Qdrant instance doing real HNSW search, not a
-mock or an in-memory stand-in. `docker-compose.yml` runs the official
-`qdrant/qdrant` image for anyone running this normally.
+**On the two mocked providers**: `AnthropicLLMProvider` and
+`OpenAILLMProvider` follow their vendors' documented APIs exactly and are
+unit-tested against mocked clients, but have not been exercised against the
+live services as part of building this project — this sandboxed
+environment has no usable API key for either. "Should work" and "verified
+live" are different claims; only the first is true right now for these two.
 
-**Testing**: 76 tests total. Vector store tests cover nearest-neighbor
-ordering, owner isolation, knowledge-base scoping, idempotent upsert, and
-deletion — all against the real server. End-to-end search tests go through
-the full real path (upload → Celery worker → Qdrant → search endpoint) and
-include a genuine relevance check: a "gradient descent" query correctly
-ranks a machine-learning chunk above unrelated cooking/recipe content.
+**Testing**: 92 tests total (up from 76 at the end of Phase 6). End-to-end
+chat tests go through the full real path — upload → Celery worker → Qdrant
+→ search → grounded generation → citations — using the local extractive
+provider, the only one this sandbox can actually execute without an API key.
 
-What's deliberately **not** here yet: LLM-generated answers (Phase 7 — this
-phase only returns raw matching chunks, no generation), hybrid/BM25 search
-and re-ranking (Phase 8), the agent layer, the frontend.
+What's deliberately **not** here yet: conversation memory across turns
+(Phase 10 — `/chat` is single-turn only right now, each question is
+independent), hybrid/BM25 search and re-ranking (Phase 8), query
+rewriting/expansion, the agent/tool-calling layer (Phase 13), streaming
+responses (Phase 14), and the frontend.
 
 ## Architecture (why the folders look like this)
 
@@ -76,9 +84,9 @@ backend/app/
 ├── models/       # SQLAlchemy ORM models          (Phase 2)
 ├── schemas/      # Pydantic request/response models (Phase 2)
 ├── services/     # orchestration logic that routes call
-├── rag/          # the RAG pipeline itself           (Phase 7+)
+├── rag/          # RAG pipeline + prompts             (Phase 7 — basic RAG done)
 ├── embeddings/   # EmbeddingProvider abstraction      (Phase 5 — done)
-├── llm/          # LLMProvider abstraction             (Phase 7)
+├── llm/          # LLMProvider abstraction             (Phase 7 — done)
 ├── agents/       # tool-calling agent layer           (Phase 13)
 ├── ingestion/     # document parsing/chunking pipeline  (Phase 4-5 — done)
 ├── retrieval/    # VectorStore + hybrid search/re-ranking (Phase 6 — VectorStore done; hybrid search Phase 8)
@@ -171,6 +179,11 @@ curl -X POST localhost:8000/api/v1/search \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{"query":"what does this document say about X?"}'
 # -> ranked chunks with score, text, and which document each came from
+
+curl -X POST localhost:8000/api/v1/chat \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"question":"what does this document say about X?"}'
+# -> {"answer": "...", "citations": [...], "model_used": "...", "context_found": true}
 ```
 
 ### Running the background worker (required for uploads to actually process)
@@ -205,6 +218,30 @@ embeddings API exactly and is unit-tested against a mocked HTTP layer
 (`tests/test_embeddings.py`), but "should work" and "verified live" are
 different claims, and only the first one is true right now.
 
+### Switching the RAG generation provider
+
+`LLM_PROVIDER=local` (the default) does real extractive answering — it
+ranks and returns the most relevant retrieved sentences verbatim, clearly
+labeled as extracted rather than generated (see
+`app/llm/local_extractive.py`). It's what lets `/chat` work end-to-end with
+no API key. For real generated answers:
+
+```bash
+# in backend/.env — pick one
+LLM_PROVIDER=anthropic
+ANTHROPIC_API_KEY=sk-ant-...
+
+# or
+LLM_PROVIDER=openai
+OPENAI_API_KEY=sk-...
+```
+
+Same caveat as the OpenAI embedding provider above: neither has been
+exercised against its live API while building this project (no network
+access to `api.openai.com`, and no usable API key for `api.anthropic.com`
+despite it being reachable here). Both follow their documented APIs exactly
+and are unit-tested against mocked clients (`tests/test_llm.py`).
+
 ### Tests
 
 Tests run against the separate `omnirag_test` database (never the dev one).
@@ -231,9 +268,10 @@ good but not infallible, especially around column type changes and renames
 
 ## Next phase
 
-**Phase 7: Basic RAG** — an `LLMProvider` abstraction (mirroring
-`EmbeddingProvider`'s pattern, so the LLM backend isn't hard-coded to one
-vendor), and wiring it to `/search`'s results: retrieve chunks, construct a
-grounded prompt, generate an answer, and return it with citations back to
-the specific chunks/documents used. This is what turns "we can find the
-right chunks" into "we can actually answer the user's question."
+**Phase 8: Hybrid retrieval + re-ranking** — adding BM25/keyword search
+alongside the existing dense vector search, merging the two result sets,
+and re-ranking the merged results before they're used as context. This is
+what the original pipeline diagram in the project spec calls for instead of
+a bare `query → embedding → top-k → LLM` shortcut, and it's the next real
+lever for answer quality now that the basic generate-with-citations loop
+(Phase 7) works end to end.

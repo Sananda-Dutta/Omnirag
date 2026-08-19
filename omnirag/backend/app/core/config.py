@@ -109,10 +109,32 @@ class Settings(BaseSettings):
     )
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
 
-    # --- LLM / embedding providers (wired up in Phase 5/7) ---
+    # --- LLM / embedding provider API keys ---
     OPENAI_API_KEY: str | None = None
     ANTHROPIC_API_KEY: str | None = None
     GOOGLE_API_KEY: str | None = None
+
+    # --- RAG generation (Phase 7) ---
+    LLM_PROVIDER: Literal["local", "anthropic", "openai"] = Field(
+        default="local",
+        description="'local' needs no network/API key and is what lets this "
+        "repo run the full RAG pipeline end-to-end in a sandboxed "
+        "environment — see app/llm/local_extractive.py for exactly what it "
+        "does and doesn't do. 'anthropic' and 'openai' are real "
+        "implementations but need their respective API keys and network access.",
+    )
+    ANTHROPIC_MODEL: str = Field(default="claude-sonnet-4-5-20250929")
+    OPENAI_CHAT_MODEL: str = Field(default="gpt-4o-mini")
+    RAG_TOP_K: int = Field(
+        default=5, description="How many chunks are retrieved as context per question."
+    )
+    RAG_MAX_CONTEXT_CHARS: int = Field(
+        default=8000,
+        description="Hard cap on total retrieved-context size sent to the "
+        "LLM, regardless of RAG_TOP_K — a safety bound against a pathological "
+        "case (very large chunks) blowing the model's context window or "
+        "running up cost on a single request.",
+    )
 
     # --- Observability (wired up in Phase 16) ---
     LANGFUSE_PUBLIC_KEY: str | None = None
