@@ -136,6 +136,36 @@ class Settings(BaseSettings):
         "running up cost on a single request.",
     )
 
+    # --- Hybrid retrieval + re-ranking (Phase 8) ---
+    ENABLE_KEYWORD_SEARCH: bool = Field(
+        default=True,
+        description="Adds Postgres full-text search alongside Qdrant dense "
+        "search, merged via Reciprocal Rank Fusion. Off falls back to "
+        "dense-only search (Phase 6 behavior) — useful for A/B comparison "
+        "once Phase 15 (evaluation) exists.",
+    )
+    ENABLE_RERANKING: bool = Field(
+        default=True,
+        description="Re-scores the fused candidate set with a lexical "
+        "reranker before truncating to RAG_TOP_K. See "
+        "app/retrieval/reranker.py for what this does and doesn't do.",
+    )
+    HYBRID_CANDIDATE_MULTIPLIER: int = Field(
+        default=4,
+        description="Each retrieval method (dense, keyword) over-fetches "
+        "top_k * this many candidates before fusion/reranking narrows back "
+        "down to top_k — fusion and reranking need a wider candidate pool "
+        "to actually change the final ranking, not just re-sort a list "
+        "that's already been cut down to the final size.",
+    )
+    RRF_K: int = Field(
+        default=60,
+        description="Reciprocal Rank Fusion damping constant — see "
+        "app/retrieval/fusion.py for what it controls. 60 is the value "
+        "used in the original RRF paper and most production systems that "
+        "cite it; not tuned specifically for this project.",
+    )
+
     # --- Observability (wired up in Phase 16) ---
     LANGFUSE_PUBLIC_KEY: str | None = None
     LANGFUSE_SECRET_KEY: str | None = None

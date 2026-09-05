@@ -152,5 +152,9 @@ async def test_chat_citation_fields_are_populated(client: AsyncClient, celery_wo
 
     assert citation["document_filename"] == "notes.txt"
     assert citation["chunk_index"] == 0
-    assert 0.0 <= citation["score"] <= 1.0001  # cosine similarity, small float slack
+    # Score semantics depend on which retrieval stage set them (raw cosine
+    # similarity, RRF fusion score, or the lexical reranker's score — see
+    # SearchResultItem.score's docstring) — only non-negative is guaranteed
+    # across all of them.
+    assert citation["score"] >= 0.0
     assert len(citation["text_snippet"]) > 0

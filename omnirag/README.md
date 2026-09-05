@@ -7,7 +7,7 @@ This repo is being built **in phases**. Each phase is a real, working
 increment — nothing is stubbed out and left broken. See `PHASES.md` (added
 once we're past a couple of phases) for what's implemented vs planned.
 
-## Current status: Phase 7 — Basic RAG
+## Current status: Phase 8 — Hybrid Retrieval + Re-ranking
 
 What exists right now:
 - **Phase 1**: FastAPI skeleton, structured logging, config, package layout, Docker.
@@ -38,6 +38,42 @@ What exists right now:
     a stronger guarantee than prompting a model not to guess, because the
     model is never given the chance to
   - `POST /api/v1/chat` — the end-to-end question-answering endpoint
+- **Phase 8** (new):
+  - `/search` and `/chat` now run a real hybrid retrieval pipeline: dense
+    vector search (Qdrant) **and** Postgres full-text keyword search, merged
+    via Reciprocal Rank Fusion (`app/retrieval/fusion.py`), then re-scored
+    by a lexical reranker (`app/retrieval/reranker.py`) before truncating
+    to the final result count — replacing Phase 6's dense-only search
+  - Keyword search uses a Postgres **generated `tsvector` column** with a
+    GIN index (`app/models/document_chunk.py`) rather than a separate
+    search engine — Postgres already runs as the system of record, so this
+    avoids operating a second stateful service for a capability it already
+    provides, the same reasoning as not building a second sync DB stack
+    for the Celery worker back in Phase 4
+  - RRF fusion is used instead of normalizing and combining raw scores
+    directly, because Qdrant's cosine similarity and Postgres's
+    `ts_rank_cd` live on completely incomparable scales — RRF sidesteps
+    that by fusing on rank position, not raw score
+  - The reranker is a real, working, clearly-labeled lexical technique
+    (normalized term frequency × in-context inverse document frequency) —
+    explicitly **not** a neural cross-encoder, since no such model is
+    reachable from this sandbox (no HuggingFace access, no reachable
+    reranking API). Same honesty pattern as `LocalHashingEmbeddingProvider`
+    and `LocalExtractiveLLMProvider`: a real technique with a stated
+    ceiling, not a placeholder pretending to be something else
+  - `ENABLE_KEYWORD_SEARCH` / `ENABLE_RERANKING` can each be turned off
+    independently, falling back toward Phase 6's dense-only behavior —
+    mainly so Phase 15 (RAG evaluation) can A/B compare configurations
+    against the same question set later, not a feature users would toggle
+
+**On this phase's development process**: at the user's request, this phase
+skipped the live end-to-end curl walkthroughs and repeated-run stability
+checks used in earlier phases, in favor of running the actual test suite
+and fixing what it caught. All 110 tests (up from 92 at the end of Phase 7)
+passed cleanly on the first full run — no bugs surfaced this time, likely
+because the design patterns this phase reused (Strategy-pattern interfaces,
+owner_id-required isolation, real-local-default-plus-mocked-real-provider)
+were already established and tested in Phases 5-7.
 
 **Two real bugs found and fixed this phase** (both caught by the tests
 written for this phase, not by inspection):
@@ -71,9 +107,9 @@ provider, the only one this sandbox can actually execute without an API key.
 
 What's deliberately **not** here yet: conversation memory across turns
 (Phase 10 — `/chat` is single-turn only right now, each question is
-independent), hybrid/BM25 search and re-ranking (Phase 8), query
-rewriting/expansion, the agent/tool-calling layer (Phase 13), streaming
-responses (Phase 14), and the frontend.
+independent), query rewriting/expansion and intent detection, the
+agent/tool-calling layer (Phase 13), streaming responses (Phase 14), and
+the frontend.
 
 ## Architecture (why the folders look like this)
 
@@ -89,7 +125,7 @@ backend/app/
 ├── llm/          # LLMProvider abstraction             (Phase 7 — done)
 ├── agents/       # tool-calling agent layer           (Phase 13)
 ├── ingestion/     # document parsing/chunking pipeline  (Phase 4-5 — done)
-├── retrieval/    # VectorStore + hybrid search/re-ranking (Phase 6 — VectorStore done; hybrid search Phase 8)
+├── retrieval/    # VectorStore + hybrid search/re-ranking (Phase 6+8 — done)
 ├── evaluation/   # RAG eval harness                    (Phase 15)
 ├── database/     # SQLAlchemy engine/session mgmt      (Phase 2)
 └── utils/        # small shared helpers
@@ -268,10 +304,10 @@ good but not infallible, especially around column type changes and renames
 
 ## Next phase
 
-**Phase 8: Hybrid retrieval + re-ranking** — adding BM25/keyword search
-alongside the existing dense vector search, merging the two result sets,
-and re-ranking the merged results before they're used as context. This is
-what the original pipeline diagram in the project spec calls for instead of
-a bare `query → embedding → top-k → LLM` shortcut, and it's the next real
-lever for answer quality now that the basic generate-with-citations loop
-(Phase 7) works end to end.
+**Phase 9: Citation system** — the pipeline already returns citations tied
+to chunk/document IDs (Phase 7), so this phase is about making them
+actually usable: an endpoint (or expanded chunk response) that lets a
+client show the exact source passage a citation points to, and stronger
+guarantees against citing a chunk that wasn't really part of the context
+sent to the LLM. Also where "no reliable source retrieved" gets tightened
+up beyond today's all-or-nothing empty-context check.

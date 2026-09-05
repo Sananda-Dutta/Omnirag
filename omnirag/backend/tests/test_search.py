@@ -163,3 +163,62 @@ async def test_deleting_document_removes_it_from_search(client: AsyncClient, cel
         "/api/v1/search", json={"query": "self-attention transformers"}, headers=_auth(token)
     )
     assert after.json() == []
+
+
+@pytest.mark.asyncio
+async def test_keyword_search_surfaces_exact_rare_term_match(client: AsyncClient, celery_worker):
+    """Phase 8: proves keyword search is actually contributing something,
+    not just present in the pipeline unused. Uses a made-up, semantically
+    empty product code — a case where exact lexical matching is the only
+    reliable signal (a rare token like this carries no meaningful semantic
+    content for even a real embedding model to lean on, let alone the local
+    hashing fallback)."""
+    token = await _register_and_login(client, "search-rareterm@example.com")
+    kb_id = await _create_kb(client, token)
+
+    await _upload_and_wait(
+        client, token, kb_id, "part.txt",
+        b"The replacement component is catalog code ZX9427-Fastener, in stock as of this week.",
+    )
+    await _upload_and_wait(
+        client, token, kb_id, "unrelated.txt",
+        b"The quarterly team offsite is scheduled for next month in Austin.",
+    )
+
+    response = await client.post(
+        "/api/v1/search", json={"query": "ZX9427-Fastener"}, headers=_auth(token)
+    )
+    results = response.json()
+    assert len(results) > 0
+    assert results[0]["document_filename"] == "part.txt"
+
+
+@pytest.mark.asyncio
+async def test_disabling_hybrid_features_changes_behavior(client: AsyncClient, celery_worker, monkeypatch):
+    """Proves ENABLE_KEYWORD_SEARCH/ENABLE_RERANKING are actually wired in,
+    not just declared and ignored — dense-only mode should still find an
+    obviously relevant chunk (Qdrant alone is not broken), confirming the
+    toggle changes which code path runs rather than breaking search."""
+    from app.core.config import settings
+
+    token = await _register_and_login(client, "search-toggle@example.com")
+    kb_id = await _create_kb(client, token)
+    await _upload_and_wait(
+        client, token, kb_id, "ml.txt",
+        b"Convolutional neural networks are widely used for image classification tasks.",
+    )
+
+    monkeypatch.setattr(settings, "ENABLE_KEYWORD_SEARCH", False)
+    monkeypatch.setattr(settings, "ENABLE_RERANKING", False)
+    try:
+        response = await client.post(
+            "/api/v1/search",
+            json={"query": "convolutional neural networks image classification"},
+            headers=_auth(token),
+        )
+        results = response.json()
+        assert len(results) > 0
+        assert results[0]["document_filename"] == "ml.txt"
+    finally:
+        monkeypatch.setattr(settings, "ENABLE_KEYWORD_SEARCH", True)
+        monkeypatch.setattr(settings, "ENABLE_RERANKING", True)

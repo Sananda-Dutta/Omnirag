@@ -27,12 +27,31 @@ models place semantically similar text in entirely different vector
 spaces), so if `EMBEDDING_PROVIDER` ever changes, chunks embedded under the
 old provider must be distinguishable from — and re-embedded, not mixed
 with — chunks under the new one.
+
+`text_search_vector` (Phase 8): a Postgres-native `tsvector`, declared as a
+generated column (`GENERATED ALWAYS AS ... STORED`) so it's computed and
+kept in sync by Postgres itself on every insert/update — there's no
+application code path that can forget to update it, unlike a
+manually-maintained derived column. Backed by a GIN index, this is what
+keyword/full-text search (app/retrieval/keyword_search.py) queries against.
+
+Why Postgres full-text search instead of a dedicated BM25 library or a
+separate search engine (Elasticsearch/OpenSearch): this project already
+runs Postgres as the system of record, and `tsvector`/`ts_rank_cd` is a
+real, production-grade keyword ranking capability built into it — adding
+Elasticsearch would mean operating a second stateful service (like the
+choice not to build a second sync DB stack for the Celery worker in Phase
+4) for a capability Postgres already provides adequately at this project's
+scale. `ts_rank_cd` isn't literally the BM25 formula, but it's the same
+family of technique (term-frequency-based lexical ranking) and is what the
+spec's "Keyword/BM25 search" pipeline stage is actually for: complementing
+dense vector search with exact-term matching dense embeddings can miss.
 """
 
 import uuid
 
-from sqlalchemy import ARRAY, Float, ForeignKey, Integer, String, Text
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import ARRAY, Computed, Float, ForeignKey, Index, Integer, String, Text
+from sqlalchemy.dialects.postgresql import TSVECTOR, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
@@ -40,6 +59,9 @@ from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
 
 class DocumentChunk(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "document_chunks"
+    __table_args__ = (
+        Index("ix_document_chunks_text_search_vector", "text_search_vector", postgresql_using="gin"),
+    )
 
     document_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True
@@ -61,6 +83,12 @@ class DocumentChunk(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     embedding: Mapped[list[float]] = mapped_column(ARRAY(Float), nullable=False)
     embedding_model: Mapped[str] = mapped_column(String(128), nullable=False)
     embedding_dimension: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    text_search_vector: Mapped[str] = mapped_column(
+        TSVECTOR,
+        Computed("to_tsvector('english', text)", persisted=True),
+        nullable=True,
+    )
 
     document: Mapped["Document"] = relationship(back_populates="chunks")
 

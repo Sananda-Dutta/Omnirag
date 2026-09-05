@@ -13,7 +13,14 @@ class SearchRequest(BaseModel):
 
 class SearchResultItem(BaseModel):
     chunk_id: uuid.UUID
-    score: float
+    score: float = Field(
+        description="Relevance score from whichever stage determined the "
+        "final ranking — the lexical reranker's score if ENABLE_RERANKING "
+        "is on, else the RRF fusion score if ENABLE_KEYWORD_SEARCH is on, "
+        "else Qdrant's raw cosine similarity. Not directly comparable "
+        "across different config, and not always a 0-1 cosine similarity — "
+        "see app/services/search_service.py."
+    )
     text: str
     chunk_index: int
     document_id: uuid.UUID
