@@ -8,7 +8,7 @@ access to api.openai.com.
 
 from openai import AsyncOpenAI
 
-from app.llm.base import LLMProvider, LLMResponse
+from app.llm.base import ConversationTurn, LLMProvider, LLMResponse
 
 
 class OpenAILLMProvider(LLMProvider):
@@ -22,13 +22,18 @@ class OpenAILLMProvider(LLMProvider):
     def model_name(self) -> str:
         return self._model
 
-    async def generate(self, *, system: str, user_message: str) -> LLMResponse:
+    async def generate(
+        self, *, system: str, history: list[ConversationTurn], user_message: str
+    ) -> LLMResponse:
+        # OpenAI's Chat Completions API also takes turns as a flat
+        # role-alternating list (system first) — history maps directly on.
+        messages = [{"role": "system", "content": system}]
+        messages += [{"role": turn.role, "content": turn.content} for turn in history]
+        messages.append({"role": "user", "content": user_message})
+
         response = await self._client.chat.completions.create(
             model=self._model,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user_message},
-            ],
+            messages=messages,
         )
         choice = response.choices[0]
         usage = response.usage

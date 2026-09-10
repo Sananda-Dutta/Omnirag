@@ -166,6 +166,18 @@ class Settings(BaseSettings):
         "cite it; not tuned specifically for this project.",
     )
 
+    # --- Conversation memory (Phase 10) ---
+    CONVERSATION_RECENT_MESSAGE_WINDOW: int = Field(
+        default=6,
+        description="How many of the most recent messages (user+assistant "
+        "combined) are sent to the LLM verbatim on every turn. Older "
+        "messages are folded into Conversation.summary instead of being "
+        "dropped or sent in full — see app/rag/memory.py. 6 messages = 3 "
+        "user/assistant pairs; a deliberately small default given the "
+        "per-message token cost of a long verbatim history on every "
+        "single turn.",
+    )
+
     # --- Observability (wired up in Phase 16) ---
     LANGFUSE_PUBLIC_KEY: str | None = None
     LANGFUSE_SECRET_KEY: str | None = None

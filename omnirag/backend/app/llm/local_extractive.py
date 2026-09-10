@@ -26,11 +26,24 @@ delimiter, rather than receiving it as a separate structured argument. That
 delimiter is a real contract with app/rag/prompts.py's template — documented
 there too. This coupling is specific to this fallback provider; a real LLM
 provider just receives the whole system string as-is and never parses it.
+
+Phase 10 (`history` parameter): accepted for interface compliance, but
+deliberately NOT used to influence scoring. A real LLM uses conversation
+history for coreference resolution — "what about the second one?" only
+makes sense with the prior turn in view. This provider's scoring is a
+one-shot lexical-overlap technique with no mechanism for resolving "the
+second one" back to something mentioned earlier; folding history text into
+the scoring vocabulary would risk diluting relevance scores with words from
+old turns without actually gaining the coreference resolution that would
+justify it. Honest limitation, not an oversight: multi-turn follow-up
+questions work noticeably worse against this provider than against a real
+LLM, which is exactly the kind of capability gap `LLM_PROVIDER=anthropic`/
+`openai` exists to close.
 """
 
 import re
 
-from app.llm.base import LLMProvider, LLMResponse
+from app.llm.base import ConversationTurn, LLMProvider, LLMResponse
 
 _CONTEXT_RE = re.compile(r"<context>(.*?)</context>", re.DOTALL)
 _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+")
@@ -70,7 +83,10 @@ class LocalExtractiveLLMProvider(LLMProvider):
     def model_name(self) -> str:
         return "local-extractive"
 
-    async def generate(self, *, system: str, user_message: str) -> LLMResponse:
+    async def generate(
+        self, *, system: str, history: list[ConversationTurn], user_message: str
+    ) -> LLMResponse:
+        # `history` intentionally unused — see module docstring's Phase 10 note.
         match = _CONTEXT_RE.search(system)
         context = match.group(1).strip() if match else ""
 

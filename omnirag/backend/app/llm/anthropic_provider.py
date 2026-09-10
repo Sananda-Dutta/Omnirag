@@ -13,7 +13,7 @@ true right now.
 
 from anthropic import AsyncAnthropic
 
-from app.llm.base import LLMProvider, LLMResponse
+from app.llm.base import ConversationTurn, LLMProvider, LLMResponse
 
 
 class AnthropicLLMProvider(LLMProvider):
@@ -28,12 +28,20 @@ class AnthropicLLMProvider(LLMProvider):
     def model_name(self) -> str:
         return self._model
 
-    async def generate(self, *, system: str, user_message: str) -> LLMResponse:
+    async def generate(
+        self, *, system: str, history: list[ConversationTurn], user_message: str
+    ) -> LLMResponse:
+        # Anthropic's Messages API takes conversation turns natively as a
+        # role-alternating list — history maps directly onto it, no string
+        # embedding needed.
+        messages = [{"role": turn.role, "content": turn.content} for turn in history]
+        messages.append({"role": "user", "content": user_message})
+
         response = await self._client.messages.create(
             model=self._model,
             max_tokens=self._max_tokens,
             system=system,
-            messages=[{"role": "user", "content": user_message}],
+            messages=messages,
         )
         # response.content is a list of content blocks (text, tool_use, ...);
         # a plain-text request produces exactly one text block.
