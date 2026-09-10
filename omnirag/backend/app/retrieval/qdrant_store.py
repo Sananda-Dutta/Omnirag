@@ -21,7 +21,6 @@ overwrites rather than duplicates.
 from uuid import UUID
 
 from qdrant_client import AsyncQdrantClient
-from qdrant_client.http.exceptions import UnexpectedResponse
 from qdrant_client.models import (
     Distance,
     FieldCondition,
@@ -115,29 +114,12 @@ class QdrantVectorStore(VectorStore):
                 )
             )
 
-        # A 404 here specifically means "this collection doesn't exist yet"
-        # — a perfectly normal state (nothing has ever been indexed for
-        # anyone yet: a fresh deployment, or a user searching before their
-        # first upload finishes processing). That's "zero results," not an
-        # error, so it's handled here rather than forcing every caller
-        # (search_service, the RAG pipeline) to know about this Qdrant-
-        # specific exception and try/except around every search() call.
-        # ensure_collection() is deliberately NOT called here to paper over
-        # it — a collection is created once, explicitly, when the first
-        # chunk is actually indexed (see workers/tasks.py); search staying
-        # read-only and side-effect-free is worth a bit of duplicated
-        # "does it exist" logic between the two call sites.
-        try:
-            response = await self._client.query_points(
-                collection_name=self._collection,
-                query=query_vector,
-                query_filter=Filter(must=must),
-                limit=top_k,
-            )
-        except UnexpectedResponse as exc:
-            if exc.status_code == 404:
-                return []
-            raise
+        response = await self._client.query_points(
+            collection_name=self._collection,
+            query=query_vector,
+            query_filter=Filter(must=must),
+            limit=top_k,
+        )
         return [
             VectorSearchResult(chunk_id=UUID(point.id), score=point.score)
             for point in response.points

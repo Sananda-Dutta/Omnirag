@@ -1,6 +1,6 @@
 import pytest
 
-from app.ingestion.chunking import chunk_text
+from app.ingestion.chunking import chunk_pages, chunk_text
 
 
 def test_empty_text_produces_no_chunks():
@@ -84,3 +84,51 @@ def test_no_words_are_lost_across_chunk_boundaries():
     chunks = chunk_text(text, chunk_size=100, chunk_overlap=0)
     reconstructed = " ".join(c.text for c in chunks)
     assert reconstructed.split() == text.split()
+
+
+# --- chunk_pages (Phase 9: page-aware chunking for citations) ---
+
+
+def test_chunk_pages_tags_each_chunk_with_its_source_page():
+    pages = ["Content from the first page.", "Content from the second page."]
+    chunks = chunk_pages(pages, chunk_size=1000, chunk_overlap=0)
+
+    assert len(chunks) == 2
+    assert chunks[0].page_number == 1
+    assert chunks[0].text == "Content from the first page."
+    assert chunks[1].page_number == 2
+    assert chunks[1].text == "Content from the second page."
+
+
+def test_chunk_pages_indexes_sequentially_across_the_whole_document():
+    # A page long enough to require multiple chunks on its own, followed by
+    # a second page — chunk_index should keep counting up across the page
+    # boundary, not reset to 0 for page 2.
+    long_page = "Sentence about the topic. " * 60
+    pages = [long_page, "A short second page."]
+    chunks = chunk_pages(pages, chunk_size=200, chunk_overlap=0)
+
+    assert [c.index for c in chunks] == list(range(len(chunks)))
+    # last chunk should be the short second page, tagged page 2
+    assert chunks[-1].page_number == 2
+    assert chunks[-1].text == "A short second page."
+
+
+def test_chunk_pages_skips_blank_pages_without_producing_empty_chunks():
+    pages = ["Real content on page one.", "", "Real content on page three."]
+    chunks = chunk_pages(pages, chunk_size=1000, chunk_overlap=0)
+
+    assert len(chunks) == 2
+    assert chunks[0].page_number == 1
+    assert chunks[1].page_number == 3  # page 2 (blank) contributed nothing
+
+
+def test_chunk_pages_empty_list_produces_no_chunks():
+    assert chunk_pages([], chunk_size=1000, chunk_overlap=0) == []
+
+
+def test_chunk_text_chunks_have_no_page_number():
+    # The original flat chunker (used for DOCX/TXT/MD, which have no page
+    # concept) should leave page_number as its default None.
+    chunks = chunk_text("Some content here.", chunk_size=1000, chunk_overlap=0)
+    assert all(c.page_number is None for c in chunks)

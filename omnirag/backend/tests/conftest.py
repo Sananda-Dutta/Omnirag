@@ -86,7 +86,6 @@ def celery_worker():
     """
     import os
     import subprocess
-    import tempfile
     import time
 
     env = os.environ.copy()
@@ -94,15 +93,6 @@ def celery_worker():
     # REDIS_URL deliberately left as-is: the worker must share the same
     # broker this test process enqueues tasks on via the API.
 
-    # NOTE: deliberately NOT passing --without-heartbeat/--without-gossip
-    # here. They look like reasonable test-speed optimizations, but on at
-    # least one real setup they caused the worker to hang at the "mingle:
-    # searching for neighbors" startup handshake and never reach "ready" —
-    # a slow-sounding failure that was actually a full hang, not slowness.
-    # A manual `celery ... worker --loglevel=info` run (no extra flags)
-    # reached "ready" in ~4s, confirming the flags were the cause, not the
-    # environment. --concurrency=1 is unrelated and kept for test resource
-    # frugality.
     proc = subprocess.Popen(
         [
             "celery",
@@ -111,6 +101,8 @@ def celery_worker():
             "worker",
             "--loglevel=info",
             "--concurrency=1",
+            "--without-heartbeat",
+            "--without-gossip",
         ],
         cwd=str(Path(__file__).resolve().parents[1]),
         env=env,
@@ -122,24 +114,7 @@ def celery_worker():
     started = time.time()
     ready = False
     lines: list[str] = []
-    # 60s, not 20s: on some setups (e.g. WSL with the project under
-    # /mnt/c/... — the Windows filesystem mounted into Linux) plain Python
-    # import time alone can take much longer than on a native Linux
-    # filesystem, well past what a tight 20s timeout allows for, with
-    # nothing actually wrong.
-    timeout_seconds = 60
-    while time.time() - started < timeout_seconds:
-        exit_code = proc.poll()
-        if exit_code is not None:
-            # The process already died — waiting out the rest of the
-            # timeout would just be reporting "not ready" for a worker
-            # that crashed on startup (e.g. an import error, or a Celery
-            # config error) seconds ago. Surface that distinctly instead of
-            # a generic timeout, since the fix is completely different
-            # (read the traceback) from "it's just slow."
-            lines.append(f"\n[process exited early with code {exit_code}]\n")
-            break
-
+    while time.time() - started < 20:
         line = proc.stdout.readline()
         if not line:
             continue
@@ -150,13 +125,7 @@ def celery_worker():
 
     if not ready:
         proc.terminate()
-        log_path = Path(tempfile.gettempdir()) / "omnirag_celery_worker_test_failure.log"
-        log_path.write_text("".join(lines))
-        raise RuntimeError(
-            "Celery worker did not become ready in time. Full captured output "
-            f"written to {log_path} (terminal output is sometimes truncated):\n\n"
-            + "".join(lines)
-        )
+        raise RuntimeError("Celery worker did not become ready in time:\n" + "".join(lines))
 
     yield proc
 

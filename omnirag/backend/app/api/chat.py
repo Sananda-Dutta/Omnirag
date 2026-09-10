@@ -37,6 +37,7 @@ async def chat(
                 document_id=c.document_id,
                 document_filename=c.document_filename,
                 chunk_index=c.chunk_index,
+                page_number=c.page_number,
                 score=c.score,
                 text_snippet=c.text_snippet,
             )

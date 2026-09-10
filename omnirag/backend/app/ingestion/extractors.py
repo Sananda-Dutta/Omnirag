@@ -30,6 +30,12 @@ class ExtractionError(Exception):
 class ExtractionResult:
     text: str
     page_count: int | None
+    # Per-page text, in order, 1-indexed by position (pages[0] is page 1).
+    # None for formats with no real page concept (DOCX, TXT, MD) — kept
+    # separate from `text` (which stays the single joined string every
+    # other part of the pipeline already expects) so this is purely
+    # additive: only page-aware chunking (Phase 9) looks at it.
+    pages: list[str] | None = None
 
 
 def extract_pdf(content: bytes) -> ExtractionResult:
@@ -48,7 +54,7 @@ def extract_pdf(content: bytes) -> ExtractionResult:
                 "No extractable text found (the PDF may be scanned/image-only; "
                 "OCR support is a planned future improvement, not yet implemented)."
             )
-        return ExtractionResult(text=text, page_count=len(reader.pages))
+        return ExtractionResult(text=text, page_count=len(reader.pages), pages=pages)
     except PdfReadError as exc:
         raise ExtractionError(f"Could not parse PDF: {exc}") from exc
 

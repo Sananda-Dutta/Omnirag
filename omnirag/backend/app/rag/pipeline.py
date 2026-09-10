@@ -31,6 +31,7 @@ class Citation:
     document_id: uuid.UUID
     document_filename: str
     chunk_index: int
+    page_number: int | None
     score: float
     text_snippet: str
 
@@ -78,6 +79,7 @@ async def answer_question(
             document_id=r.document_id,
             document_filename=r.document_filename,
             chunk_index=r.chunk_index,
+            page_number=r.page_number,
             score=r.score,
             text_snippet=r.text[:200],
         )

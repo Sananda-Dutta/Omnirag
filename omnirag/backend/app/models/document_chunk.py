@@ -79,6 +79,13 @@ class DocumentChunk(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
     text: Mapped[str] = mapped_column(Text, nullable=False)
     char_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Nullable: only populated for paginated formats (PDF). TXT/MD/DOCX have
+    # no meaningful page concept, so their chunks leave this null rather
+    # than a misleading placeholder like 1. See app/ingestion/chunking.py's
+    # `chunk_pages` for how this gets set — chunking is done per-page for
+    # PDFs specifically so a chunk is never ambiguous about which page it
+    # came from.
+    page_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     embedding: Mapped[list[float]] = mapped_column(ARRAY(Float), nullable=False)
     embedding_model: Mapped[str] = mapped_column(String(128), nullable=False)

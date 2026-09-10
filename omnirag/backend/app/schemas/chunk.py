@@ -21,6 +21,7 @@ class ChunkRead(BaseModel):
     chunk_index: int
     text: str
     char_count: int
+    page_number: int | None
     embedding_model: str
     embedding_dimension: int
     created_at: datetime

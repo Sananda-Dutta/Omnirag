@@ -46,6 +46,7 @@ class Chunk:
     index: int
     text: str
     char_count: int
+    page_number: int | None = None
 
 
 def _split_on_separator(text: str, separator: str) -> list[str]:
@@ -126,3 +127,43 @@ def chunk_text(text: str, chunk_size: int, chunk_overlap: int) -> list[Chunk]:
     return [
         Chunk(index=i, text=piece, char_count=len(piece)) for i, piece in enumerate(overlapped)
     ]
+
+
+def chunk_pages(pages: list[str], chunk_size: int, chunk_overlap: int) -> list[Chunk]:
+    """
+    Page-aware chunking (Phase 9), used for PDFs so every chunk can carry an
+    accurate `page_number` for citations.
+
+    Deliberately chunks each page independently — via repeated chunk_text()
+    calls, not a single call across the whole joined document — rather than
+    chunking the full joined text and trying to map each resulting chunk's
+    character offsets back to a source page after the fact. The offset-
+    mapping approach is more precise in principle (a chunk could legitimately
+    span a page break) but requires chunk_text() to track provenance through
+    every split/overlap step, which the existing (already well-tested)
+    implementation doesn't do and wasn't designed to.
+
+    The real tradeoff, stated plainly: a paragraph that spans a page break
+    gets split at that page boundary even if it wouldn't otherwise hit
+    chunk_size — trading a small amount of chunk continuity for citations
+    that are always unambiguous about which single page they came from. For
+    a citation system, "always know which page" matters more than "never
+    split a mid-page-break paragraph."
+
+    Chunk `index` is renumbered to be sequential across the whole document
+    (not reset per page) — chunk_index is meant to identify a chunk's
+    position in the document overall, not its position within its page.
+    """
+    all_chunks: list[Chunk] = []
+    for page_num, page_text in enumerate(pages, start=1):
+        page_chunks = chunk_text(page_text, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+        for c in page_chunks:
+            all_chunks.append(
+                Chunk(
+                    index=len(all_chunks),
+                    text=c.text,
+                    char_count=c.char_count,
+                    page_number=page_num,
+                )
+            )
+    return all_chunks

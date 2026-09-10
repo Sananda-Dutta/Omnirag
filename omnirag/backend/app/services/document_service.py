@@ -132,6 +132,10 @@ async def delete_document(db: AsyncSession, owner_id: uuid.UUID, document_id: uu
     await db.commit()
 
 
+class ChunkNotFoundError(Exception):
+    pass
+
+
 async def list_chunks(
     db: AsyncSession, owner_id: uuid.UUID, document_id: uuid.UUID
 ) -> list["DocumentChunk"]:
@@ -144,3 +148,29 @@ async def list_chunks(
         .order_by(DocumentChunk.chunk_index)
     )
     return list(result.scalars().all())
+
+
+async def get_chunk(
+    db: AsyncSession, owner_id: uuid.UUID, document_id: uuid.UUID, chunk_id: uuid.UUID
+) -> "DocumentChunk":
+    """Fetches one chunk's full detail — this is what "clicking a citation"
+    resolves to: the exact source passage a citation points to, not just
+    the 200-char snippet already inline in a chat response's citation list.
+
+    document_id is required (not inferred from chunk_id alone) so the
+    ownership check reuses get_document's existing 404-not-403 behavior —
+    a chunk_id that's real but belongs to a different document the caller
+    also doesn't own shouldn't behave any differently from a chunk_id that
+    doesn't exist at all."""
+    from app.models.document_chunk import DocumentChunk
+
+    await get_document(db, owner_id, document_id)  # ownership check; raises DocumentNotFoundError
+    result = await db.execute(
+        select(DocumentChunk)
+        .where(DocumentChunk.id == chunk_id)
+        .where(DocumentChunk.document_id == document_id)
+    )
+    chunk = result.scalar_one_or_none()
+    if chunk is None:
+        raise ChunkNotFoundError(str(chunk_id))
+    return chunk

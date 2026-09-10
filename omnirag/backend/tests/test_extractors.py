@@ -25,6 +25,16 @@ def _make_pdf_with_text(text: str) -> bytes:
     return buffer.getvalue()
 
 
+def _make_multipage_pdf(page_texts: list[str]) -> bytes:
+    buffer = BytesIO()
+    c = canvas.Canvas(buffer)
+    for text in page_texts:
+        c.drawString(72, 750, text)
+        c.showPage()
+    c.save()
+    return buffer.getvalue()
+
+
 def _make_encrypted_pdf() -> bytes:
     writer = PdfWriter()
     writer.add_blank_page(width=200, height=200)
@@ -69,6 +79,33 @@ def test_extract_pdf_recovers_real_text():
     result = extract_text(pdf_bytes, ".pdf")
     assert "RAG combines retrieval" in result.text
     assert result.page_count == 1
+
+
+def test_extract_pdf_exposes_per_page_text():
+    pdf_bytes = _make_multipage_pdf(["First page content here.", "Second page content here."])
+    result = extract_text(pdf_bytes, ".pdf")
+
+    assert result.page_count == 2
+    assert result.pages is not None
+    assert len(result.pages) == 2
+    assert "First page content" in result.pages[0]
+    assert "Second page content" in result.pages[1]
+    # And the flat `text` field still exists for callers that only need the
+    # whole document (char_count, extracted_text storage) — unaffected by
+    # the new `pages` field being additive, not a replacement.
+    assert "First page content" in result.text
+    assert "Second page content" in result.text
+
+
+def test_extract_docx_has_no_pages():
+    docx_bytes = _make_docx_with_text(["Some content."])
+    result = extract_text(docx_bytes, ".docx")
+    assert result.pages is None
+
+
+def test_extract_plain_text_has_no_pages():
+    result = extract_text(b"Some plain text content.", ".txt")
+    assert result.pages is None
 
 
 def test_extract_pdf_rejects_encrypted_file():

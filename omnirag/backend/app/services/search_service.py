@@ -121,6 +121,7 @@ async def search(
                 score=score,
                 text=chunk.text,
                 chunk_index=chunk.chunk_index,
+                page_number=chunk.page_number,
                 document_id=chunk.document_id,
                 document_filename=chunk.document.filename,
             )

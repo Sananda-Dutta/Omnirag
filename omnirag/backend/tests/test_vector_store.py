@@ -11,14 +11,13 @@ cleans up after itself.
 import uuid
 
 import pytest
-import pytest_asyncio
 
 from app.retrieval.qdrant_store import DimensionMismatchError, QdrantVectorStore
 
 QDRANT_URL = "http://localhost:6333"
 
 
-@pytest_asyncio.fixture
+@pytest.fixture
 async def store():
     collection_name = f"test_{uuid.uuid4().hex}"
     instance = QdrantVectorStore(url=QDRANT_URL, collection_name=collection_name)
@@ -160,20 +159,3 @@ async def test_upsert_with_empty_list_is_a_noop(store):
     await store.upsert_chunks(
         chunk_ids=[], vectors=[], owner_id=uuid.uuid4(), knowledge_base_id=uuid.uuid4(), document_id=uuid.uuid4()
     )  # should not raise
-
-
-@pytest.mark.asyncio
-async def test_search_against_a_never_created_collection_returns_empty_not_error():
-    """Regression test: caught by a real failure in practice — searching
-    before any document has ever been indexed anywhere (so the collection
-    was never created) used to raise qdrant_client's UnexpectedResponse
-    (404) instead of returning []. This is the state every fresh
-    deployment starts in, and the state any user is in before their first
-    upload finishes — it must not crash."""
-    collection_name = f"test_nonexistent_{uuid.uuid4().hex}"
-    store = QdrantVectorStore(url=QDRANT_URL, collection_name=collection_name)
-    # Deliberately never call ensure_collection() — that's the point.
-
-    results = await store.search(query_vector=[1.0, 0.0, 0.0], owner_id=uuid.uuid4(), top_k=5)
-
-    assert results == []

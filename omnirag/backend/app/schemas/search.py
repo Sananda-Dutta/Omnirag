@@ -23,5 +23,8 @@ class SearchResultItem(BaseModel):
     )
     text: str
     chunk_index: int
+    page_number: int | None = Field(
+        default=None, description="1-indexed PDF page this chunk came from. Null for non-paginated formats (TXT/MD/DOCX)."
+    )
     document_id: uuid.UUID
     document_filename: str

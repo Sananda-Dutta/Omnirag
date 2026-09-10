@@ -25,10 +25,12 @@ from app.models.user import User
 from app.schemas.chunk import ChunkRead
 from app.schemas.document import DocumentDetail, DocumentRead
 from app.services.document_service import (
+    ChunkNotFoundError,
     DocumentNotFoundError,
     FileTooLargeError,
     UnsupportedFileTypeError,
     delete_document,
+    get_chunk,
     get_document,
     list_chunks,
     list_documents,
@@ -103,6 +105,22 @@ async def list_document_chunks(
     try:
         return await list_chunks(db, current_user.id, document_id)
     except DocumentNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND) from exc
+
+
+@router.get("/documents/{document_id}/chunks/{chunk_id}", response_model=ChunkRead)
+async def get_document_chunk(
+    document_id: uuid.UUID,
+    chunk_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Resolves a citation to its exact source passage — what a client
+    calls when a user clicks a citation in a chat answer, rather than
+    settling for the ~200-char snippet already inline in the citation."""
+    try:
+        return await get_chunk(db, current_user.id, document_id, chunk_id)
+    except (DocumentNotFoundError, ChunkNotFoundError) as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND) from exc
 
 

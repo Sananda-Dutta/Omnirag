@@ -15,6 +15,7 @@ class CitationItem(BaseModel):
     document_id: uuid.UUID
     document_filename: str
     chunk_index: int
+    page_number: int | None = None
     score: float
     text_snippet: str
 

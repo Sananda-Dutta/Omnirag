@@ -44,7 +44,7 @@ from sqlalchemy.orm import selectinload
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.embeddings.factory import get_embedding_provider
-from app.ingestion.chunking import chunk_text
+from app.ingestion.chunking import chunk_pages, chunk_text
 from app.ingestion.extractors import ExtractionError, extract_text
 from app.ingestion.storage import get_storage_backend
 from app.models.document import Document, DocumentStatus
@@ -97,7 +97,7 @@ async def _run(db: AsyncSession, document_id: UUID) -> None:
         document.page_count = result.page_count
         document.char_count = len(result.text)
 
-        await _chunk_and_embed(db, document)
+        await _chunk_and_embed(db, document, pages=result.pages)
 
         document.status = DocumentStatus.COMPLETED
         document.error_message = None
@@ -122,18 +122,29 @@ async def _run(db: AsyncSession, document_id: UUID) -> None:
     await db.commit()
 
 
-async def _chunk_and_embed(db: AsyncSession, document: Document) -> None:
+async def _chunk_and_embed(
+    db: AsyncSession, document: Document, pages: list[str] | None = None
+) -> None:
     """Splits document.extracted_text into chunks, embeds each one,
     (re)persists them as DocumentChunk rows, and indexes them into the
     vector store. Any exception here propagates to _run's except block and
     marks the document FAILED — a document whose text extracted fine but
     couldn't be chunked/embedded/indexed is not actually usable for
-    retrieval, so COMPLETED must not be reported for it."""
-    pieces = chunk_text(
-        document.extracted_text or "",
-        chunk_size=settings.CHUNK_SIZE,
-        chunk_overlap=settings.CHUNK_OVERLAP,
-    )
+    retrieval, so COMPLETED must not be reported for it.
+
+    `pages`: per-page text from the extractor (PDF only — None for
+    DOCX/TXT/MD, which have no real page concept). When present, chunking
+    runs per-page (chunk_pages) so every chunk carries an accurate
+    page_number for citations; otherwise falls back to the original flat
+    chunk_text over the whole document."""
+    if pages is not None:
+        pieces = chunk_pages(pages, chunk_size=settings.CHUNK_SIZE, chunk_overlap=settings.CHUNK_OVERLAP)
+    else:
+        pieces = chunk_text(
+            document.extracted_text or "",
+            chunk_size=settings.CHUNK_SIZE,
+            chunk_overlap=settings.CHUNK_OVERLAP,
+        )
 
     # Idempotent reprocessing: clear existing chunks before inserting new
     # ones (cascade="all, delete-orphan" on Document.chunks issues the
@@ -164,6 +175,7 @@ async def _chunk_and_embed(db: AsyncSession, document: Document) -> None:
                 chunk_index=piece.index,
                 text=piece.text,
                 char_count=piece.char_count,
+                page_number=piece.page_number,
                 embedding=vector,
                 embedding_model=provider.model_name,
                 embedding_dimension=provider.dimension,
