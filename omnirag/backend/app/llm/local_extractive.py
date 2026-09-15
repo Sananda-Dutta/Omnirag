@@ -83,9 +83,9 @@ class LocalExtractiveLLMProvider(LLMProvider):
     def model_name(self) -> str:
         return "local-extractive"
 
-    async def generate(
-        self, *, system: str, history: list[ConversationTurn], user_message: str
-    ) -> LLMResponse:
+    async def generate(self, *, system: str, user_message: str, history: list[ConversationTurn] | None = None) -> str:
+        history = history or []
+        ...
         # `history` intentionally unused — see module docstring's Phase 10 note.
         match = _CONTEXT_RE.search(system)
         context = match.group(1).strip() if match else ""

@@ -28,9 +28,10 @@ class AnthropicLLMProvider(LLMProvider):
     def model_name(self) -> str:
         return self._model
 
-    async def generate(
-        self, *, system: str, history: list[ConversationTurn], user_message: str
-    ) -> LLMResponse:
+    async def generate(self, *, system: str, user_message: str, history: list[ConversationTurn] | None = None) -> str:
+        history = history or []
+        ...
+    
         # Anthropic's Messages API takes conversation turns natively as a
         # role-alternating list — history maps directly onto it, no string
         # embedding needed.

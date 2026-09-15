@@ -22,9 +22,9 @@ class OpenAILLMProvider(LLMProvider):
     def model_name(self) -> str:
         return self._model
 
-    async def generate(
-        self, *, system: str, history: list[ConversationTurn], user_message: str
-    ) -> LLMResponse:
+    async def generate(self, *, system: str, user_message: str, history: list[ConversationTurn] | None = None) -> str:
+        history = history or []
+        ...
         # OpenAI's Chat Completions API also takes turns as a flat
         # role-alternating list (system first) — history maps directly on.
         messages = [{"role": "system", "content": system}]
