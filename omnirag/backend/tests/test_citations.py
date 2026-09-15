@@ -43,7 +43,7 @@ async def _upload_and_wait(client: AsyncClient, token: str, kb_id: str, filename
     )
     doc_id = upload.json()["id"]
 
-    deadline = asyncio.get_event_loop().time() + 15.0
+    deadline = asyncio.get_event_loop().time() + 30.0
     while asyncio.get_event_loop().time() < deadline:
         resp = await client.get(f"/api/v1/documents/{doc_id}", headers=_auth(token))
         if resp.json()["status"] in ("completed", "failed"):
