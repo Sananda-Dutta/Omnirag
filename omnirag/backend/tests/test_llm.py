@@ -196,7 +196,7 @@ async def test_local_extractive_ignores_history_without_erroring():
     provider = LocalExtractiveLLMProvider()
     system = build_system_prompt("Gradient descent minimizes a loss function.")
     history = [ConversationTurn(role="user", content="Something unrelated entirely.")]
-    response = await provider.generate(system=system, history=history, user_message="What does it minimize?")
+    response = await provider.generate(system=system, history=history, user_message="What does gradient descent minimize?")
     assert "loss function" in response.text.lower() or "minimizes" in response.text.lower()
 
 
