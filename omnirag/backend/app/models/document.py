@@ -49,6 +49,7 @@ class Document(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     # touching any other column, since callers only ever read the file back
     # through the StorageBackend abstraction, never this path directly.
     storage_path: Mapped[str] = mapped_column(String(1024), nullable=False)
+    source_url: Mapped[str | None] = mapped_column(String, nullable=True)
 
     status: Mapped[DocumentStatus] = mapped_column(
         Enum(DocumentStatus, name="document_status"),
