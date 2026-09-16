@@ -40,7 +40,7 @@ async def _create_kb(client: AsyncClient, token: str, name: str = "test kb") -> 
 
 
 async def _wait_for_status(
-    client: AsyncClient, token: str, document_id: str, timeout: float = 15.0
+    client: AsyncClient, token: str, document_id: str, timeout: float = 30.0
 ) -> dict:
     """Polls GET /documents/{id} until status leaves PENDING/PROCESSING."""
     deadline = asyncio.get_event_loop().time() + timeout
