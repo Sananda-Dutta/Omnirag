@@ -31,6 +31,16 @@ before new ones are inserted (via `document.chunks.clear()`, relying on the
 model's `cascade="all, delete-orphan"`), so re-running this task for the
 same document — e.g. after a chunking bug fix — doesn't accumulate
 duplicate chunks.
+
+Phase 12 (`process_url_document_task`): a separate task for URL-sourced
+documents rather than overloading `process_document_task` with a branch.
+The two have genuinely different failure domains — file extraction
+(corrupt/encrypted files) vs network fetch (SSRF guarding, unreachable
+hosts, unsupported content types) — so keeping them as separate tasks
+keeps each one's except-block honest about what it's actually handling,
+same reasoning as web_fetcher.py's URLFetchError being distinct from
+ExtractionError. Both converge on the same `_chunk_and_embed` — the
+part of the pipeline that doesn't care where the text came from.
 """
 
 import asyncio
@@ -47,6 +57,7 @@ from app.embeddings.factory import get_embedding_provider
 from app.ingestion.chunking import chunk_pages, chunk_text
 from app.ingestion.extractors import ExtractionError, extract_text
 from app.ingestion.storage import get_storage_backend
+from app.ingestion.web_fetcher import URLFetchError, fetch_and_extract
 from app.models.document import Document, DocumentStatus
 from app.models.document_chunk import DocumentChunk
 from app.retrieval.factory import get_vector_store
@@ -122,21 +133,87 @@ async def _run(db: AsyncSession, document_id: UUID) -> None:
     await db.commit()
 
 
+async def _process_url_document(document_id: str) -> None:
+    """Same isolation pattern as `_process_document`: dedicated engine per
+    task invocation, disposed in `finally`."""
+    engine = create_async_engine(settings.DATABASE_URL, pool_size=2, max_overflow=0)
+    session_local = async_sessionmaker(bind=engine, expire_on_commit=False)
+
+    try:
+        async with session_local() as db:
+            await _run_url(db, UUID(document_id))
+    finally:
+        await engine.dispose()
+
+
+async def _run_url(db: AsyncSession, document_id: UUID) -> None:
+    document = (
+        await db.execute(
+            select(Document)
+            .options(selectinload(Document.knowledge_base), selectinload(Document.chunks))
+            .where(Document.id == document_id)
+        )
+    ).scalar_one_or_none()
+
+    if document is None:
+        logger.warning("document_not_found", extra={"context": {"document_id": str(document_id)}})
+        return
+
+    document.status = DocumentStatus.PROCESSING
+    await db.commit()
+
+    try:
+        page = await fetch_and_extract(document.source_url)
+
+        document.extracted_text = page.text
+        document.page_count = None
+        document.char_count = len(page.text)
+        if page.title:
+            document.filename = page.title[:255]
+
+        # URL-sourced text has no per-page structure (unlike PDFs), so this
+        # goes through the same flat chunk_text path as DOCX/TXT uploads —
+        # pages=None, matching _run's behavior for those file types.
+        await _chunk_and_embed(db, document, pages=None)
+
+        document.status = DocumentStatus.COMPLETED
+        document.error_message = None
+
+    except URLFetchError as exc:
+        document.status = DocumentStatus.FAILED
+        document.error_message = str(exc)
+        logger.info(
+            "url_document_fetch_failed",
+            extra={"context": {"document_id": str(document_id), "reason": str(exc)}},
+        )
+
+    except Exception as exc:  # noqa: BLE001 — intentional catch-all, see module docstring
+        document.status = DocumentStatus.FAILED
+        document.error_message = "An unexpected error occurred while processing this URL."
+        logger.error(
+            "url_document_processing_unexpected_error",
+            extra={"context": {"document_id": str(document_id)}},
+            exc_info=exc,
+        )
+
+    await db.commit()
+
+
 async def _chunk_and_embed(
     db: AsyncSession, document: Document, pages: list[str] | None = None
 ) -> None:
     """Splits document.extracted_text into chunks, embeds each one,
     (re)persists them as DocumentChunk rows, and indexes them into the
-    vector store. Any exception here propagates to _run's except block and
-    marks the document FAILED — a document whose text extracted fine but
-    couldn't be chunked/embedded/indexed is not actually usable for
-    retrieval, so COMPLETED must not be reported for it.
+    vector store. Any exception here propagates to the caller's except
+    block and marks the document FAILED — a document whose text extracted
+    fine but couldn't be chunked/embedded/indexed is not actually usable
+    for retrieval, so COMPLETED must not be reported for it.
 
     `pages`: per-page text from the extractor (PDF only — None for
-    DOCX/TXT/MD, which have no real page concept). When present, chunking
-    runs per-page (chunk_pages) so every chunk carries an accurate
-    page_number for citations; otherwise falls back to the original flat
-    chunk_text over the whole document."""
+    DOCX/TXT/MD and URL-sourced documents, which have no real page
+    concept). When present, chunking runs per-page (chunk_pages) so every
+    chunk carries an accurate page_number for citations; otherwise falls
+    back to the original flat chunk_text over the whole document."""
     if pages is not None:
         pieces = chunk_pages(pages, chunk_size=settings.CHUNK_SIZE, chunk_overlap=settings.CHUNK_OVERLAP)
     else:
@@ -196,3 +273,8 @@ async def _chunk_and_embed(
 @celery_app.task(name="process_document")
 def process_document_task(document_id: str) -> None:
     asyncio.run(_process_document(document_id))
+
+
+@celery_app.task(name="process_url_document")
+def process_url_document_task(document_id: str) -> None:
+    asyncio.run(_process_url_document(document_id))

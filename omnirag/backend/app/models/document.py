@@ -41,14 +41,17 @@ class Document(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         nullable=False,
         index=True,
     )
+   
 
     filename: Mapped[str] = mapped_column(String(512), nullable=False)
     content_type: Mapped[str] = mapped_column(String(128), nullable=False)
-    file_size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+
     # Path on disk (Phase 4) — swappable for an S3 key/URL later without
     # touching any other column, since callers only ever read the file back
     # through the StorageBackend abstraction, never this path directly.
-    storage_path: Mapped[str] = mapped_column(String(1024), nullable=False)
+    file_size_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    storage_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    
     source_url: Mapped[str | None] = mapped_column(String, nullable=True)
 
     status: Mapped[DocumentStatus] = mapped_column(

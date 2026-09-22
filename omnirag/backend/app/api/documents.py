@@ -12,11 +12,19 @@ known, deliberate limit for Phase 4 (fine up to MAX_UPLOAD_SIZE_MB=20MB) —
 true streaming validation (rejecting an oversized file before it's fully
 buffered) is a Phase 19 (security/hardening) concern, noted there rather
 than solved here.
+
+Phase 12 (`ingest_url`): takes a URL instead of a file — same downstream
+pipeline (extract -> chunk -> embed -> index) via a separate Celery task,
+since URL fetching has its own failure modes (network errors, SSRF
+guarding, unsupported content types) that don't overlap with file
+validation. See app/ingestion/web_fetcher.py for the fetch/extract step
+and URLFetchError for its failure cases.
 """
 
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
+from pydantic import BaseModel, HttpUrl
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_current_user
@@ -32,6 +40,7 @@ from app.services.document_service import (
     delete_document,
     get_chunk,
     get_document,
+    ingest_url_document,
     list_chunks,
     list_documents,
     upload_document,
@@ -39,6 +48,10 @@ from app.services.document_service import (
 from app.services.knowledge_base_service import KnowledgeBaseNotFoundError
 
 router = APIRouter(tags=["documents"])
+
+
+class URLIngestRequest(BaseModel):
+    url: HttpUrl
 
 
 @router.post(
@@ -70,6 +83,28 @@ async def upload(
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc)
         ) from exc
+
+
+@router.post(
+    "/knowledge-bases/{knowledge_base_id}/documents/url",
+    response_model=DocumentRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def ingest_url(
+    knowledge_base_id: uuid.UUID,
+    payload: URLIngestRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        return await ingest_url_document(
+            db,
+            owner_id=current_user.id,
+            knowledge_base_id=knowledge_base_id,
+            url=str(payload.url),
+        )
+    except KnowledgeBaseNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND) from exc
 
 
 @router.get("/knowledge-bases/{knowledge_base_id}/documents", response_model=list[DocumentRead])

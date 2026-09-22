@@ -5,6 +5,17 @@ Validation order matters here: extension check first (free, no I/O), then
 size check (already-known from the upload, no I/O), and only then do we
 write anything to disk or the DB. Rejecting a bad upload should never leave
 a half-written file or an orphan DB row behind.
+
+Phase 12 (`ingest_url_document`): no extension/size validation applies here
+— a URL isn't a file, so those checks are replaced entirely by
+web_fetcher.py's own validation (scheme allowlist, private-IP blocking,
+content-type check, byte cap), which runs later, inside the Celery task,
+not here. That's a deliberate difference from upload_document: file
+validation is cheap and synchronous, so it happens before any I/O; URL
+validation (resolving DNS, fetching the page) is exactly the slow I/O this
+endpoint should NOT block the request on — so the Document row is created
+in PENDING immediately and the real validation happens in the background
+task, same as extraction failures already do for file uploads.
 """
 
 import uuid
@@ -89,6 +100,36 @@ async def upload_document(
     return document
 
 
+async def ingest_url_document(
+    db: AsyncSession,
+    owner_id: uuid.UUID,
+    knowledge_base_id: uuid.UUID,
+    url: str,
+) -> Document:
+    # Same ownership check as upload_document — raises
+    # KnowledgeBaseNotFoundError (-> 404) if this KB isn't the caller's.
+    await get_knowledge_base(db, owner_id, knowledge_base_id)
+
+    document = Document(
+        knowledge_base_id=knowledge_base_id,
+        filename=url,  # replaced with the page's real <title> once fetched, in the worker
+        source_url=url,
+        content_type="text/html",
+        file_size_bytes=None,  # unknown until fetched; see module docstring
+        storage_path=None,  # no uploaded file backs a URL-sourced document
+    )
+    db.add(document)
+    await db.commit()
+    await db.refresh(document)
+
+    # Same deferred-import reasoning as upload_document.
+    from app.workers.tasks import process_url_document_task
+
+    process_url_document_task.delay(str(document.id))
+
+    return document
+
+
 async def list_documents(
     db: AsyncSession, owner_id: uuid.UUID, knowledge_base_id: uuid.UUID
 ) -> list[Document]:
@@ -121,7 +162,9 @@ async def delete_document(db: AsyncSession, owner_id: uuid.UUID, document_id: uu
     from app.retrieval.factory import get_vector_store
 
     document = await get_document(db, owner_id, document_id)
-    get_storage_backend().delete(document.storage_path)
+    if document.storage_path is not None:
+        # URL-sourced documents have no on-disk file to delete.
+        get_storage_backend().delete(document.storage_path)
     # Vector cleanup happens before the DB delete, not after: if it ran
     # after and the Qdrant call failed, we'd be left with a document
     # deleted from Postgres but still fully searchable (with dead chunk_ids)
