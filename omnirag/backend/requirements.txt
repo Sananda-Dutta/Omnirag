@@ -38,3 +38,18 @@ anthropic==0.42.0  # AnthropicLLMProvider — real implementation, needs ANTHROP
 
 # NOTE: google-generativeai is intentionally NOT listed yet — no Gemini
 # provider has been built, so it's not a real dependency of this codebase yet.
+
+# --- Phase 12: web ingestion ---
+beautifulsoup4==4.12.3  # HTML text extraction in app/ingestion/web_fetcher.py
+
+# --- Phase 15: RAG evaluation ---
+# No new hard dependency: the default evaluator (app/evaluation/local_evaluator.py)
+# is pure stdlib + the embedding provider this project already has, for the
+# same "runs with zero extra setup" reason as LOCAL_LLM/EMBEDDING_PROVIDER.
+# ragas is intentionally NOT listed as a hard dependency — RagasEvaluator
+# (app/evaluation/ragas_evaluator.py) imports it lazily and raises a clear
+# error if it's missing, the same pattern as the optional OpenAI/Anthropic
+# providers needing their SDKs. Install it yourself to use EVAL_PROVIDER=ragas:
+#   pip install ragas langchain-community==0.3.27
+# (the langchain-community pin works around an upstream ragas import bug
+# against langchain-community>=0.4 — see ragas_evaluator.py's docstring)

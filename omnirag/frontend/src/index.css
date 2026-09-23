@@ -1,0 +1,80 @@
+@import "tailwindcss";
+
+@import "@fontsource/lora/500.css";
+@import "@fontsource/lora/600.css";
+@import "@fontsource/inter/400.css";
+@import "@fontsource/inter/500.css";
+@import "@fontsource/inter/600.css";
+@import "@fontsource/jetbrains-mono/400.css";
+@import "@fontsource/jetbrains-mono/500.css";
+
+/*
+ * OmniRAG design tokens.
+ *
+ * The brief: a knowledge-indexing tool, not a generic SaaS dashboard —
+ * palette and type lean on the "archive / annotated document" metaphor
+ * (ink, marginalia, indexed sources) rather than the default dark-mode
+ * violet-on-near-black look. Serif (Lora) carries headings the way a
+ * library catalog card would; monospace (JetBrains Mono) is reserved for
+ * things that are literally data — filenames, chunk indices, model names,
+ * scores — never for decoration. Body UI text is Inter.
+ */
+@theme {
+  --font-display: "Lora", ui-serif, Georgia, serif;
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "Cascadia Code", monospace;
+
+  --color-ink-950: #0e1116;
+  --color-ink-900: #13161d;
+  --color-ink-850: #171b24;
+  --color-ink-800: #1c212c;
+  --color-ink-700: #262d3a;
+  --color-ink-600: #333c4d;
+  --color-ink-500: #4a5568;
+
+  --color-paper-100: #f2efe6;
+  --color-paper-200: #e6e1d3;
+  --color-paper-muted: #9aa1b0;
+  --color-paper-faint: #6b7284;
+
+  --color-gold-400: #d9ad5b;
+  --color-gold-500: #c99a44;
+  --color-gold-600: #ad8236;
+
+  --color-moss-400: #6fae82;
+  --color-moss-500: #4f9468;
+
+  --color-rust-400: #d97662;
+  --color-rust-500: #c25c48;
+}
+
+html {
+  color-scheme: dark;
+}
+
+body {
+  background-color: var(--color-ink-950);
+  color: var(--color-paper-100);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background-color: color-mix(in srgb, var(--color-gold-500) 35%, transparent);
+}
+
+/* A visible focus ring everywhere, not just on inputs — keyboard nav
+   through document lists and citation chips needs this as much as forms do. */
+:focus-visible {
+  outline: 2px solid var(--color-gold-500);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    transition-duration: 0.001ms !important;
+  }
+}

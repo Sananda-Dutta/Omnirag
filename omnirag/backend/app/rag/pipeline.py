@@ -42,6 +42,14 @@ class RAGAnswer:
     citations: list[Citation]
     model_used: str
     context_found: bool
+    # Phase 15: the exact labeled context block handed to the LLM (same
+    # string `build_system_prompt` embedded in the system prompt), not just
+    # each citation's 200-char `text_snippet`. Evaluation needs to score
+    # faithfulness against precisely what the model saw, not an
+    # approximation of it — see app/evaluation/local_evaluator.py. Empty
+    # string when context_found is False (no chunks retrieved, LLM never
+    # called).
+    context: str = ""
 
 
 async def answer_question(
@@ -91,6 +99,7 @@ async def answer_question(
         citations=citations,
         model_used=response.model,
         context_found=True,
+        context=context,
     )
 
 

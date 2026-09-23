@@ -13,7 +13,15 @@ class DocumentRead(BaseModel):
     knowledge_base_id: uuid.UUID
     filename: str
     content_type: str
-    file_size_bytes: int
+    # Nullable, not int: Phase 12 URL-sourced documents have no uploaded
+    # file at all (no bytes were ever read into this process), so there is
+    # no honest byte count to report until the worker fetches the page.
+    # Coercing this to 0 would be a fabricated value, not a missing one.
+    file_size_bytes: int | None
+    # Phase 12: set for URL-sourced documents (the URL the content was
+    # fetched from), null for uploaded files. Exposed so a client can show
+    # "from https://..." instead of guessing from `filename` alone.
+    source_url: str | None = None
     status: DocumentStatus
     error_message: str | None
     page_count: int | None

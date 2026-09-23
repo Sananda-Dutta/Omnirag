@@ -182,6 +182,21 @@ class Settings(BaseSettings):
     LANGFUSE_PUBLIC_KEY: str | None = None
     LANGFUSE_SECRET_KEY: str | None = None
 
+    # --- RAG evaluation (Phase 15) ---
+    EVAL_PROVIDER: Literal["local", "ragas"] = Field(
+        default="local",
+        description="'local' (LocalHeuristicEvaluator) needs no API key/network "
+        "— lexical overlap for faithfulness/correctness, embedding cosine "
+        "similarity (via this project's configured EmbeddingProvider) for "
+        "answer relevancy. 'ragas' is a real integration against the Ragas "
+        "library's LLM-judged metrics but needs a real OPENAI_API_KEY — see "
+        "app/evaluation/ragas_evaluator.py for the honest tradeoffs.",
+    )
+    EVAL_JUDGE_MODEL: str = Field(
+        default="gpt-4o-mini",
+        description="OpenAI model Ragas uses as the judge for EVAL_PROVIDER=ragas. Unused by EVAL_PROVIDER=local.",
+    )
+
     @property
     def is_production(self) -> bool:
         return self.APP_ENV == "production"

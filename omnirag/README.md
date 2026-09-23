@@ -7,20 +7,27 @@ This repo is being built **in phases**. Each phase is a real, working
 increment — nothing is stubbed out and left broken. See `PHASES.md` (added
 once we're past a couple of phases) for what's implemented vs planned.
 
-> **⚠️ Before trusting Phase 9**: it was written in a session with no
-> network access (couldn't install dependencies or run a database) and has
-> only been syntax-checked, not executed. Run this first:
-> ```bash
-> cd backend && . .venv/bin/activate
-> alembic upgrade head          # applies the hand-written Phase 9 migration
-> pytest tests/ -v               # full suite, including tests/test_citations.py
-> ```
-> If anything fails, it's most likely in `chunk_pages` (app/ingestion/
-> chunking.py), the Phase 9 migration, or the reportlab multi-page PDF
-> helper in the new tests — see the "unusually constrained" note under
-> Phase 9 below for the full story.
+> **Verified**: Phase 9 was originally written in a session with no network
+> access and shipped only syntax-checked, not executed. It, along with
+> Phases 12, 15, and 17, has since been run for real against live
+> Postgres + Redis + Qdrant — `alembic upgrade head` and `pytest tests/ -v`
+> (196 tests) both pass. See "Current status" below for what's still
+> unverified (the two real Anthropic/OpenAI LLM providers, and the Ragas
+> evaluator — both need API keys this sandbox doesn't have) and what's not
+> built yet (Phases 10/11/13/14/16).
 
-## Current status: Phase 9 — Citation System
+## Current status: Phases 9, 12, 15 & 17
+
+What's deliberately **not** here yet: conversation memory across turns
+(Phase 10 — `/chat` is single-turn only right now, each question is
+independent — a `conversations`/`messages` schema exists in
+`app/models/conversation.py` but isn't wired into `/chat` yet), query
+rewriting/expansion and intent detection, the agent/tool-calling layer
+(Phase 11/13), streaming responses (Phase 14), and observability (Phase 16
+— `LANGFUSE_*` settings exist as placeholders only). Phases 12, 15, and 17
+were built out of the original sequence, at the user's request, on top of
+the Phase 9 codebase — see each phase's own section below for what that
+means for verification status.
 
 What exists right now:
 - **Phase 1**: FastAPI skeleton, structured logging, config, package layout, Docker.
@@ -158,8 +165,88 @@ not independently verified" until someone runs the suite for real.
 What's deliberately **not** here yet: conversation memory across turns
 (Phase 10 — `/chat` is single-turn only right now, each question is
 independent), query rewriting/expansion and intent detection, the
-agent/tool-calling layer (Phase 13), streaming responses (Phase 14), and
-the frontend.
+agent/tool-calling layer (Phase 13), streaming responses (Phase 14).
+
+- **Phase 12 — Web ingestion** (new, this session):
+  - `app/ingestion/web_fetcher.py` (`fetch_and_extract`) already existed
+    from a prior session with no network access, alongside
+    `ingest_url_document` in `app/services/document_service.py` and
+    `POST /knowledge-bases/{id}/documents/url` — but it had never been run:
+    **two real bugs were found and fixed** this session — `DocumentRead`
+    declared `file_size_bytes: int` (non-nullable) which would have thrown
+    on every URL-sourced document's response, since there's no honest byte
+    count for a page that was never uploaded as a file; and `source_url`
+    wasn't exposed in the response schema at all. Both fixed.
+    `beautifulsoup4` was also missing from `requirements.txt` despite being
+    a hard import.
+  - SSRF guarding (`_is_safe_host`) rejects private/link-local/loopback
+    targets before ever making a request, real content-type and
+    `MAX_CONTENT_BYTES` limits, and the page's real `<title>` replaces the
+    URL-as-placeholder filename once fetched
+  - **Verified for real this session**, not just syntax-checked: this repo
+    now has a working local Postgres + Redis + a real Qdrant binary (see
+    "Running the project" below for how cheap this is without Docker), and
+    25 new tests were added and passed — `tests/test_web_fetcher.py`
+    (mocked-transport unit tests for the SSRF/content-type/size-cap edge
+    cases) and `tests/test_url_ingestion.py` (true end-to-end tests that
+    fetch real pages from `github.com`/`raw.githubusercontent.com` through
+    the real Celery worker — no mocking)
+
+- **Phase 15 — RAG evaluation** (new, this session):
+  - `app/evaluation/` follows the same `EvaluationProvider` Strategy
+    pattern as `EmbeddingProvider`/`LLMProvider`/`VectorStore`:
+    `LocalHeuristicEvaluator` (default, zero dependencies — lexical overlap
+    for faithfulness/correctness, embedding cosine similarity for answer
+    relevancy) and `RagasEvaluator` (a real integration against the
+    [Ragas](https://github.com/explodinggradients/ragas) library's
+    LLM-judged metrics, lazily imported since `ragas` isn't a hard
+    dependency — set `EVAL_PROVIDER=ragas` and a real `OPENAI_API_KEY` to
+    use it)
+  - **A real upstream dependency bug, found and worked around**: a bare
+    `pip install ragas` resolves an incompatible `langchain-community`
+    (latest, dropped a submodule ragas 0.4.3 still imports at module load).
+    Documented fix, verified working in this sandbox:
+    `pip install ragas langchain-community==0.3.27`. See
+    `app/evaluation/ragas_evaluator.py`'s docstring.
+  - `app/evaluation/metrics.py` — plain-function retrieval metrics
+    (precision@k, recall@k, MRR, hit rate)
+  - `POST /api/v1/evaluation/run` (`app/services/evaluation_service.py`)
+    runs the **real** `/chat` pipeline per question (not a parallel
+    eval-only code path) against a user-supplied question set, scoring
+    both retrieval (when `expected_document_filenames` is given) and
+    generation quality, returning per-question results plus averages
+  - 34 new tests, all passing against real infrastructure: pure-function
+    metric tests, `LocalHeuristicEvaluator` behavior tests, real
+    end-to-end tests through `/evaluation/run` against an uploaded
+    document, and `RagasEvaluator` construction-level tests (no live
+    OpenAI call — no usable key in this sandbox, same honest limit as the
+    Phase 7 Anthropic/OpenAI provider tests)
+
+- **Phase 17 — Frontend** (new, this session):
+  - `frontend/`: React 19 + TypeScript + Vite 8 + Tailwind CSS v4, React
+    Router, and TanStack Query. A deliberate design system (ink/paper/gold
+    palette; Lora for headings, Inter for UI text, JetBrains Mono reserved
+    for actual data — filenames, chunk indices, scores) rather than the
+    generic dark-mode-SaaS defaults
+  - Auth (login/register/JWT in `localStorage`), knowledge base
+    create/list/delete, drag-and-drop file upload **and** URL ingestion
+    (Phase 12) with live status polling while a document is
+    pending/processing, a chat interface with numbered citation chips that
+    open a modal showing the exact source chunk (Phase 9), and an
+    evaluation runner (Phase 15) that builds a small QA set inline and
+    renders the scored report
+  - **Verified**: `tsc -b` (strict, `noUnusedLocals`/`noUnusedParameters`
+    on) and `npm run build` both succeed cleanly. The full stack was then
+    smoke-tested for real — backend + Celery worker + Postgres + Redis +
+    Qdrant all running, `vite dev` proxying `/api` to the backend exactly
+    as configured — through a real register → login → create knowledge
+    base → upload → chat → evaluate flow, hitting the dev server's own
+    `/api/*` URLs (i.e. the exact requests the browser UI makes), not the
+    backend directly. What this does **not** cover: an actual browser
+    rendering the UI (no headless-browser tooling reachable in this
+    sandbox to take a screenshot or click through it) — the visual
+    layout/interactions haven't been eyeballed, only proven to compile,
+    build, and correctly drive the real API.
 
 ## Architecture (why the folders look like this)
 
@@ -174,11 +261,20 @@ backend/app/
 ├── embeddings/   # EmbeddingProvider abstraction      (Phase 5 — done)
 ├── llm/          # LLMProvider abstraction             (Phase 7 — done)
 ├── agents/       # tool-calling agent layer           (Phase 13)
-├── ingestion/     # document parsing/chunking pipeline  (Phase 4-5 — done)
+├── ingestion/     # document parsing/chunking pipeline  (Phase 4-5 — done, + Phase 12 web ingestion)
 ├── retrieval/    # VectorStore + hybrid search/re-ranking (Phase 6+8 — done)
-├── evaluation/   # RAG eval harness                    (Phase 15)
+├── evaluation/   # RAG eval harness                    (Phase 15 — done)
 ├── database/     # SQLAlchemy engine/session mgmt      (Phase 2)
 └── utils/        # small shared helpers
+```
+
+```
+frontend/src/
+├── lib/          # api.ts (typed client), types.ts        (Phase 17 — done)
+├── context/      # AuthContext (JWT session)
+├── hooks/        # React Query hooks, one module per resource
+├── components/   # documents/, chat/, evaluation/, knowledge-base/, layout/, common/
+└── pages/        # LoginPage, RegisterPage, DashboardPage, KnowledgeBasePage
 ```
 
 Routers stay thin; all real logic lives in `services/` or the domain
@@ -284,6 +380,25 @@ Without a worker running, uploads succeed and sit in `status: pending`
 forever — the API and the worker are deliberately decoupled, so this is
 expected, not a bug (Redis holds the queued task until something consumes it).
 
+### Running the frontend (Phase 17)
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Opens on `http://localhost:5173`. Its Vite dev server proxies `/api/*` to
+`http://localhost:8000` (see `vite.config.ts`), so the backend just needs
+to be running on its default port — no CORS config, no `.env` needed on
+the frontend side. Register an account, create a knowledge base, and
+upload/chat/evaluate from there.
+
+`npm run build` produces a static `frontend/dist/` you can serve with any
+static file host — it has no server-side rendering step, just talk to the
+backend's real URL in production (set up a reverse proxy the same way the
+dev server's `/api` proxy works, or adjust `lib/api.ts`'s base URL).
+
 ### Switching embedding providers
 
 `EMBEDDING_PROVIDER=local` (the default) needs nothing extra and is what
@@ -361,3 +476,10 @@ original spec's token/cost-aware design), and `GET/DELETE /conversations`.
 This is also the natural point to revisit persisting citations to a real
 `citations` table tied to each assistant message, which Phase 9 explicitly
 deferred since there was no `messages` row yet to attach them to.
+
+Phases 12, 15, and 17 (web ingestion, RAG evaluation, frontend) were
+pulled forward out of sequence and are done — see "Current status" above.
+Still open, in original order: Phase 10 (above), Phase 11 (agent/tool
+calling), Phase 13 (model routing by query complexity), Phase 14
+(streaming responses), Phase 16 (Langfuse observability), and Phases
+18-22 (security hardening, deployment/CI, final docs).
