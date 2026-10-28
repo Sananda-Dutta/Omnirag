@@ -125,8 +125,6 @@ class RagasEvaluator(EvaluationProvider):
         context: str,
         ground_truth_answer: str | None,
     ) -> GenerationScores:
-        self._ensure_metrics()
-
         if not context.strip():
             # Same "not applicable, not zero" reasoning as
             # LocalHeuristicEvaluator — no context was ever retrieved, so
@@ -135,6 +133,8 @@ class RagasEvaluator(EvaluationProvider):
             # be the fixed "nothing found" response would just be paying
             # for an API call with a foregone conclusion.
             return GenerationScores(faithfulness=None, answer_relevancy=None, answer_correctness=None)
+
+        self._ensure_metrics()
 
         faithfulness_result = await self._faithfulness.ascore(
             user_input=question, response=answer, retrieved_contexts=[context]

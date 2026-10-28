@@ -3,6 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_current_user
 from app.database.session import get_db
+from app.llm.base import LLMProviderError
 from app.models.user import User
 from app.rag.pipeline import answer_question
 from app.schemas.chat import ChatRequest, ChatResponse, CitationItem
@@ -26,6 +27,10 @@ async def chat(
         )
     except KnowledgeBaseNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND) from exc
+    except LLMProviderError as exc:
+        # The upstream model service failed, not this API — 502, with the
+        # provider-error text (never contains the key) so the UI can show it.
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 
     return ChatResponse(
         answer=result.answer,

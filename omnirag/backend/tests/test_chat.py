@@ -158,3 +158,35 @@ async def test_chat_citation_fields_are_populated(client: AsyncClient, celery_wo
     # across all of them.
     assert citation["score"] >= 0.0
     assert len(citation["text_snippet"]) > 0
+
+
+# --- Free-LLM support: a failing LLM must produce a readable 502, not a bare 500 ---
+
+
+@pytest.mark.asyncio
+async def test_chat_returns_502_with_readable_detail_when_llm_provider_fails(
+    client: AsyncClient, celery_worker, monkeypatch
+):
+    from app.llm.base import LLMProviderError
+
+    class BrokenProvider:
+        model_name = "broken"
+
+        async def generate(self, **kwargs):
+            raise LLMProviderError("LLM provider error (401): the API key was rejected")
+
+    monkeypatch.setattr("app.rag.pipeline.get_llm_provider", lambda: BrokenProvider())
+
+    token = await _register_and_login(client, "llm-fail@example.com")
+    kb_id = await _create_kb(client, token)
+    await _upload_and_wait(
+        client, token, kb_id, "facts.txt", b"RAG grounds answers in retrieved documents."
+    )
+
+    resp = await client.post(
+        "/api/v1/chat",
+        json={"question": "What does RAG do?", "knowledge_base_id": kb_id},
+        headers=_auth(token),
+    )
+    assert resp.status_code == 502
+    assert "API key was rejected" in resp.json()["detail"]

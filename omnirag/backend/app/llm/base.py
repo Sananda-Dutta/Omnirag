@@ -24,6 +24,15 @@ from dataclasses import dataclass
 from typing import Literal
 
 
+class LLMProviderError(Exception):
+    """The configured LLM provider failed (bad key, wrong model name, rate
+    limit, network error, empty reply...). The message is safe to show to
+    the user: providers build it from the status code and the provider's
+    own error text and never include the API key. The API layer turns this
+    into an HTTP 502 with this message as `detail`, so the UI can say what
+    actually went wrong instead of a generic "something went wrong"."""
+
+
 @dataclass(frozen=True)
 class ConversationTurn:
     role: Literal["user", "assistant"]

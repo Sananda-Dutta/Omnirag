@@ -3,6 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_current_user
 from app.database.session import get_db
+from app.llm.base import LLMProviderError
 from app.models.user import User
 from app.schemas.evaluation import EvalReport, EvalRunRequest
 from app.services.evaluation_service import run_evaluation
@@ -27,3 +28,7 @@ async def run(
         return await run_evaluation(db, owner_id=current_user.id, request=payload)
     except KnowledgeBaseNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND) from exc
+    except LLMProviderError as exc:
+        # The upstream model service failed, not this API — 502, with the
+        # provider-error text (never contains the key) so the UI can show it.
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc

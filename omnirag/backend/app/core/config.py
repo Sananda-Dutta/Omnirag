@@ -125,6 +125,17 @@ class Settings(BaseSettings):
     )
     ANTHROPIC_MODEL: str = Field(default="claude-sonnet-4-5-20250929")
     OPENAI_CHAT_MODEL: str = Field(default="gpt-4o-mini")
+    OPENAI_BASE_URL: str | None = Field(
+        default=None,
+        description="Point LLM_PROVIDER=openai at any OpenAI-compatible "
+        "endpoint instead of api.openai.com — this is how free providers "
+        "plug in with no new code: Groq (https://api.groq.com/openai/v1), "
+        "Google Gemini (https://generativelanguage.googleapis.com/v1beta/openai/), "
+        "OpenRouter (https://openrouter.ai/api/v1), or a local Ollama "
+        "(http://localhost:11434/v1). Only affects the chat LLM, not "
+        "embeddings. Must be set HERE (in .env), not just exported in a "
+        "shell — the app reads .env itself.",
+    )
     RAG_TOP_K: int = Field(
         default=5, description="How many chunks are retrieved as context per question."
     )

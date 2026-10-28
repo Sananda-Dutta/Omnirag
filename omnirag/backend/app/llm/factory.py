@@ -19,7 +19,11 @@ def _build_provider(cfg: Settings) -> LLMProvider:
     if cfg.LLM_PROVIDER == "anthropic":
         return AnthropicLLMProvider(api_key=cfg.ANTHROPIC_API_KEY or "", model=cfg.ANTHROPIC_MODEL)
     if cfg.LLM_PROVIDER == "openai":
-        return OpenAILLMProvider(api_key=cfg.OPENAI_API_KEY or "", model=cfg.OPENAI_CHAT_MODEL)
+        return OpenAILLMProvider(
+            api_key=cfg.OPENAI_API_KEY or "",
+            model=cfg.OPENAI_CHAT_MODEL,
+            base_url=cfg.OPENAI_BASE_URL,
+        )
     # Unreachable given Settings.LLM_PROVIDER's Literal type — defensive
     # guard, same reasoning as app/embeddings/factory.py.
     raise ValueError(f"Unknown LLM_PROVIDER: {cfg.LLM_PROVIDER!r}")

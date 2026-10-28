@@ -11,9 +11,10 @@ against the live service" are different claims, and only the first one is
 true right now.
 """
 
+import anthropic
 from anthropic import AsyncAnthropic
 
-from app.llm.base import ConversationTurn, LLMProvider, LLMResponse
+from app.llm.base import ConversationTurn, LLMProvider, LLMProviderError, LLMResponse
 
 
 class AnthropicLLMProvider(LLMProvider):
@@ -28,22 +29,33 @@ class AnthropicLLMProvider(LLMProvider):
     def model_name(self) -> str:
         return self._model
 
-    async def generate(self, *, system: str, user_message: str, history: list[ConversationTurn] | None = None) -> str:
+    async def generate(
+        self,
+        *,
+        system: str,
+        user_message: str,
+        history: list[ConversationTurn] | None = None,
+    ) -> LLMResponse:
         history = history or []
-        ...
-    
         # Anthropic's Messages API takes conversation turns natively as a
         # role-alternating list — history maps directly onto it, no string
         # embedding needed.
         messages = [{"role": turn.role, "content": turn.content} for turn in history]
         messages.append({"role": "user", "content": user_message})
 
-        response = await self._client.messages.create(
-            model=self._model,
-            max_tokens=self._max_tokens,
-            system=system,
-            messages=messages,
-        )
+        try:
+            response = await self._client.messages.create(
+                model=self._model,
+                max_tokens=self._max_tokens,
+                system=system,
+                messages=messages,
+            )
+        except anthropic.APIStatusError as exc:
+            raise LLMProviderError(
+                f"LLM provider error ({exc.status_code}): {exc.message}"
+            ) from exc
+        except anthropic.APIConnectionError as exc:
+            raise LLMProviderError("Could not reach the Anthropic API.") from exc
         # response.content is a list of content blocks (text, tool_use, ...);
         # a plain-text request produces exactly one text block.
         text = "".join(block.text for block in response.content if block.type == "text")
