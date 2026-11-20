@@ -1,0 +1,15 @@
+.env
+.env.*
+**/.env
+**/.env.*
+node_modules/
+dist/
+.venv/
+venv/
+__pycache__/
+.pytest_cache/
+qdrant/
+qdrant.tar.gz
+qdrant_storage/
+uploads/
+*.pyc

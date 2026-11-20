@@ -1,0 +1,219 @@
+"""
+Document service.
+
+Validation order matters here: extension check first (free, no I/O), then
+size check (already-known from the upload, no I/O), and only then do we
+write anything to disk or the DB. Rejecting a bad upload should never leave
+a half-written file or an orphan DB row behind.
+
+Phase 12 (`ingest_url_document`): no extension/size validation applies here
+— a URL isn't a file, so those checks are replaced entirely by
+web_fetcher.py's own validation (scheme allowlist, private-IP blocking,
+content-type check, byte cap), which runs later, inside the Celery task,
+not here. That's a deliberate difference from upload_document: file
+validation is cheap and synchronous, so it happens before any I/O; URL
+validation (resolving DNS, fetching the page) is exactly the slow I/O this
+endpoint should NOT block the request on — so the Document row is created
+in PENDING immediately and the real validation happens in the background
+task, same as extraction failures already do for file uploads.
+"""
+
+import uuid
+from pathlib import Path
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.config import settings
+from app.ingestion.storage import get_storage_backend
+from app.models.document import Document
+from app.services.knowledge_base_service import get_knowledge_base
+
+
+class UnsupportedFileTypeError(Exception):
+    pass
+
+
+class FileTooLargeError(Exception):
+    pass
+
+
+class DocumentNotFoundError(Exception):
+    pass
+
+
+def validate_upload(filename: str, size_bytes: int) -> str:
+    """Returns the validated lowercase extension, or raises."""
+    extension = Path(filename).suffix.lower()
+    if extension not in settings.ALLOWED_UPLOAD_EXTENSIONS:
+        raise UnsupportedFileTypeError(
+            f"'{extension or '(no extension)'}' is not supported. "
+            f"Allowed types: {', '.join(settings.ALLOWED_UPLOAD_EXTENSIONS)}"
+        )
+    if size_bytes > settings.max_upload_size_bytes:
+        raise FileTooLargeError(
+            f"File is {size_bytes / (1024 * 1024):.1f}MB, "
+            f"which exceeds the {settings.MAX_UPLOAD_SIZE_MB}MB limit."
+        )
+    return extension
+
+
+async def upload_document(
+    db: AsyncSession,
+    owner_id: uuid.UUID,
+    knowledge_base_id: uuid.UUID,
+    filename: str,
+    content_type: str,
+    content: bytes,
+) -> Document:
+    # Raises KnowledgeBaseNotFoundError (-> 404) if this KB isn't the
+    # caller's — this is what stops a user from uploading into someone
+    # else's knowledge base by guessing/brute-forcing a UUID.
+    await get_knowledge_base(db, owner_id, knowledge_base_id)
+
+    extension = validate_upload(filename, len(content))
+
+    storage = get_storage_backend()
+    storage_path = await storage.save(content, extension)
+
+    document = Document(
+        knowledge_base_id=knowledge_base_id,
+        filename=filename,
+        content_type=content_type,
+        file_size_bytes=len(content),
+        storage_path=storage_path,
+    )
+    db.add(document)
+    await db.commit()
+    await db.refresh(document)
+
+    # Imported here, not at module load: importing app.workers.tasks eagerly
+    # pulls in the Celery app (which reads settings.REDIS_URL and, if a
+    # broker connection is attempted at import time in some Celery configs,
+    # can slow down or fail app startup in environments with no Redis
+    # reachable yet, e.g. a bare `pip install` sanity check). Deferring the
+    # import to the one call site that needs it keeps that coupling local.
+    from app.workers.tasks import process_document_task
+
+    process_document_task.delay(str(document.id))
+
+    return document
+
+
+async def ingest_url_document(
+    db: AsyncSession,
+    owner_id: uuid.UUID,
+    knowledge_base_id: uuid.UUID,
+    url: str,
+) -> Document:
+    # Same ownership check as upload_document — raises
+    # KnowledgeBaseNotFoundError (-> 404) if this KB isn't the caller's.
+    await get_knowledge_base(db, owner_id, knowledge_base_id)
+
+    document = Document(
+        knowledge_base_id=knowledge_base_id,
+        filename=url,  # replaced with the page's real <title> once fetched, in the worker
+        source_url=url,
+        content_type="text/html",
+        file_size_bytes=None,  # unknown until fetched; see module docstring
+        storage_path=None,  # no uploaded file backs a URL-sourced document
+    )
+    db.add(document)
+    await db.commit()
+    await db.refresh(document)
+
+    # Same deferred-import reasoning as upload_document.
+    from app.workers.tasks import process_url_document_task
+
+    process_url_document_task.delay(str(document.id))
+
+    return document
+
+
+async def list_documents(
+    db: AsyncSession, owner_id: uuid.UUID, knowledge_base_id: uuid.UUID
+) -> list[Document]:
+    await get_knowledge_base(db, owner_id, knowledge_base_id)  # ownership check
+    result = await db.execute(
+        select(Document)
+        .where(Document.knowledge_base_id == knowledge_base_id)
+        .order_by(Document.created_at.desc())
+    )
+    return list(result.scalars().all())
+
+
+async def get_document(db: AsyncSession, owner_id: uuid.UUID, document_id: uuid.UUID) -> Document:
+    # Joins through KnowledgeBase to enforce ownership in the query itself,
+    # same reasoning as knowledge_base_service — no fetch-then-check.
+    from app.models.knowledge_base import KnowledgeBase
+
+    result = await db.execute(
+        select(Document)
+        .join(KnowledgeBase, Document.knowledge_base_id == KnowledgeBase.id)
+        .where(Document.id == document_id, KnowledgeBase.owner_id == owner_id)
+    )
+    document = result.scalar_one_or_none()
+    if document is None:
+        raise DocumentNotFoundError(str(document_id))
+    return document
+
+
+async def delete_document(db: AsyncSession, owner_id: uuid.UUID, document_id: uuid.UUID) -> None:
+    from app.retrieval.factory import get_vector_store
+
+    document = await get_document(db, owner_id, document_id)
+    if document.storage_path is not None:
+        # URL-sourced documents have no on-disk file to delete.
+        get_storage_backend().delete(document.storage_path)
+    # Vector cleanup happens before the DB delete, not after: if it ran
+    # after and the Qdrant call failed, we'd be left with a document
+    # deleted from Postgres but still fully searchable (with dead chunk_ids)
+    # via the vector store — the worse of the two orderings. Failing here
+    # instead leaves the document intact and deletable again on retry.
+    await get_vector_store().delete_by_document(document_id=document_id, owner_id=owner_id)
+    await db.delete(document)
+    await db.commit()
+
+
+class ChunkNotFoundError(Exception):
+    pass
+
+
+async def list_chunks(
+    db: AsyncSession, owner_id: uuid.UUID, document_id: uuid.UUID
+) -> list["DocumentChunk"]:
+    from app.models.document_chunk import DocumentChunk
+
+    await get_document(db, owner_id, document_id)  # ownership check; raises DocumentNotFoundError
+    result = await db.execute(
+        select(DocumentChunk)
+        .where(DocumentChunk.document_id == document_id)
+        .order_by(DocumentChunk.chunk_index)
+    )
+    return list(result.scalars().all())
+
+
+async def get_chunk(
+    db: AsyncSession, owner_id: uuid.UUID, document_id: uuid.UUID, chunk_id: uuid.UUID
+) -> "DocumentChunk":
+    """Fetches one chunk's full detail — this is what "clicking a citation"
+    resolves to: the exact source passage a citation points to, not just
+    the 200-char snippet already inline in a chat response's citation list.
+
+    document_id is required (not inferred from chunk_id alone) so the
+    ownership check reuses get_document's existing 404-not-403 behavior —
+    a chunk_id that's real but belongs to a different document the caller
+    also doesn't own shouldn't behave any differently from a chunk_id that
+    doesn't exist at all."""
+    from app.models.document_chunk import DocumentChunk
+
+    await get_document(db, owner_id, document_id)  # ownership check; raises DocumentNotFoundError
+    result = await db.execute(
+        select(DocumentChunk)
+        .where(DocumentChunk.id == chunk_id)
+        .where(DocumentChunk.document_id == document_id)
+    )
+    chunk = result.scalar_one_or_none()
+    if chunk is None:
+        raise ChunkNotFoundError(str(chunk_id))
+    return chunk

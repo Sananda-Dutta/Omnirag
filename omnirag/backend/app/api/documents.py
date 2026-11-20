@@ -1,0 +1,171 @@
+"""
+Document routes.
+
+Upload takes the file as multipart/form-data (FastAPI's UploadFile) rather
+than base64-in-JSON — base64 inflates payload size by ~33% and forces the
+whole file to sit in memory as a string before FastAPI even sees it as
+bytes. UploadFile streams from a spooled temp file, which matters once
+someone uploads a file close to MAX_UPLOAD_SIZE_MB.
+
+Reading the whole file into memory with `await file.read()` here is a
+known, deliberate limit for Phase 4 (fine up to MAX_UPLOAD_SIZE_MB=20MB) —
+true streaming validation (rejecting an oversized file before it's fully
+buffered) is a Phase 19 (security/hardening) concern, noted there rather
+than solved here.
+
+Phase 12 (`ingest_url`): takes a URL instead of a file — same downstream
+pipeline (extract -> chunk -> embed -> index) via a separate Celery task,
+since URL fetching has its own failure modes (network errors, SSRF
+guarding, unsupported content types) that don't overlap with file
+validation. See app/ingestion/web_fetcher.py for the fetch/extract step
+and URLFetchError for its failure cases.
+"""
+
+import uuid
+
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
+from pydantic import BaseModel, HttpUrl
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.deps import get_current_user
+from app.database.session import get_db
+from app.models.user import User
+from app.schemas.chunk import ChunkRead
+from app.schemas.document import DocumentDetail, DocumentRead
+from app.services.document_service import (
+    ChunkNotFoundError,
+    DocumentNotFoundError,
+    FileTooLargeError,
+    UnsupportedFileTypeError,
+    delete_document,
+    get_chunk,
+    get_document,
+    ingest_url_document,
+    list_chunks,
+    list_documents,
+    upload_document,
+)
+from app.services.knowledge_base_service import KnowledgeBaseNotFoundError
+
+router = APIRouter(tags=["documents"])
+
+
+class URLIngestRequest(BaseModel):
+    url: HttpUrl
+
+
+@router.post(
+    "/knowledge-bases/{knowledge_base_id}/documents",
+    response_model=DocumentRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def upload(
+    knowledge_base_id: uuid.UUID,
+    file: UploadFile,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    content = await file.read()
+    try:
+        return await upload_document(
+            db,
+            owner_id=current_user.id,
+            knowledge_base_id=knowledge_base_id,
+            filename=file.filename or "unnamed",
+            content_type=file.content_type or "application/octet-stream",
+            content=content,
+        )
+    except KnowledgeBaseNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND) from exc
+    except UnsupportedFileTypeError as exc:
+        raise HTTPException(status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail=str(exc)) from exc
+    except FileTooLargeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc)
+        ) from exc
+
+
+@router.post(
+    "/knowledge-bases/{knowledge_base_id}/documents/url",
+    response_model=DocumentRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def ingest_url(
+    knowledge_base_id: uuid.UUID,
+    payload: URLIngestRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        return await ingest_url_document(
+            db,
+            owner_id=current_user.id,
+            knowledge_base_id=knowledge_base_id,
+            url=str(payload.url),
+        )
+    except KnowledgeBaseNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND) from exc
+
+
+@router.get("/knowledge-bases/{knowledge_base_id}/documents", response_model=list[DocumentRead])
+async def list_for_knowledge_base(
+    knowledge_base_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        return await list_documents(db, current_user.id, knowledge_base_id)
+    except KnowledgeBaseNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND) from exc
+
+
+@router.get("/documents/{document_id}", response_model=DocumentDetail)
+async def get_one(
+    document_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        return await get_document(db, current_user.id, document_id)
+    except DocumentNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND) from exc
+
+
+@router.get("/documents/{document_id}/chunks", response_model=list[ChunkRead])
+async def list_document_chunks(
+    document_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        return await list_chunks(db, current_user.id, document_id)
+    except DocumentNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND) from exc
+
+
+@router.get("/documents/{document_id}/chunks/{chunk_id}", response_model=ChunkRead)
+async def get_document_chunk(
+    document_id: uuid.UUID,
+    chunk_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Resolves a citation to its exact source passage — what a client
+    calls when a user clicks a citation in a chat answer, rather than
+    settling for the ~200-char snippet already inline in the citation."""
+    try:
+        return await get_chunk(db, current_user.id, document_id, chunk_id)
+    except (DocumentNotFoundError, ChunkNotFoundError) as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND) from exc
+
+
+@router.delete("/documents/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete(
+    document_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        await delete_document(db, current_user.id, document_id)
+    except DocumentNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND) from exc

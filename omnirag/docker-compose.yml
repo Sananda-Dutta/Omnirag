@@ -1,0 +1,106 @@
+# Phase 6: `qdrant` is real now too. `postgres` + `redis` + `qdrant` +
+# `backend` + `worker` are all real. Frontend is added for real in its own
+# later phase.
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: omnirag
+      POSTGRES_PASSWORD: omnirag
+      POSTGRES_DB: omnirag
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U omnirag"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  qdrant:
+    image: qdrant/qdrant:v1.12.4
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      # Qdrant's image has no curl/wget; a bare TCP connect via /dev/tcp is
+      # enough to confirm the HTTP port is accepting connections.
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/6333' || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    env_file:
+      - ./backend/.env
+    environment:
+      # Overrides .env's `localhost` — inside Compose's network, dependencies
+      # are reachable by service name, not localhost.
+      DATABASE_URL: postgresql+asyncpg://omnirag:omnirag@postgres:5432/omnirag
+      REDIS_URL: redis://redis:6379/0
+      VECTOR_DB_URL: http://qdrant:6333
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+      - upload_data:/app/uploads
+    command: >
+      sh -c "alembic upgrade head &&
+             uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    env_file:
+      - ./backend/.env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://omnirag:omnirag@postgres:5432/omnirag
+      REDIS_URL: redis://redis:6379/0
+      VECTOR_DB_URL: http://qdrant:6333
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+      # Shared with `backend` so the worker can read files the API saved to
+      # disk. This shared-volume dependency is exactly the kind of coupling
+      # that goes away when Phase 20 swaps LocalStorage for S3 — both
+      # containers would talk to S3 directly instead of a shared filesystem.
+      - upload_data:/app/uploads
+    command: celery -A app.workers.celery_app worker --loglevel=info
+
+  # frontend:        # added in Phase 17
+
+volumes:
+  postgres_data:
+  upload_data:
+  qdrant_data:

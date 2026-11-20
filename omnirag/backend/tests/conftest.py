@@ -1,0 +1,175 @@
+"""
+Test fixtures for database-backed tests.
+
+Why a separate test database instead of mocking the DB:
+    Mocking SQLAlchemy sessions gives false confidence — it tests that your
+    code calls `.add()` and `.commit()`, not that the actual SQL is valid,
+    that the foreign key/unique constraints hold, or that the migration
+    that created the schema is correct. For a project whose entire point is
+    "production-grade," the tests should hit a real Postgres. `omnirag_test`
+    (created alongside the dev DB) is that database — never the dev one, so
+    tests can never corrupt data you're looking at during development.
+
+Why create/drop tables per test session via metadata instead of running
+Alembic in tests: Alembic migrations are tested by actually running them
+(we did that manually against the dev DB, and CI will do it again in
+Phase 19). For unit/integration tests, `Base.metadata.create_all` against
+the test DB is faster and keeps the test suite decoupled from migration
+history — what matters here is "do the models + queries behave correctly,"
+not "does the migration chain apply cleanly" (that's a separate, explicit
+check).
+"""
+
+from collections.abc import AsyncGenerator
+from pathlib import Path
+
+import pytest
+import pytest_asyncio
+from httpx import ASGITransport, AsyncClient
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import NullPool
+
+from app.database.session import get_db
+from app.main import app
+from app.models import Base
+
+import os
+
+# Tests must never depend on (or spend quota on) real providers in .env
+os.environ["LLM_PROVIDER"] = "local"
+os.environ["EMBEDDING_PROVIDER"] = "local"
+os.environ["EVAL_PROVIDER"] = "local"
+os.environ["EMBEDDING_DIMENSION"] = "384"
+
+TEST_DATABASE_URL = "postgresql+asyncpg://omnirag:omnirag@localhost:5432/omnirag_test"
+
+
+@pytest_asyncio.fixture(scope="function")
+async def db_session() -> AsyncGenerator[AsyncSession, None]:
+    # NullPool + a fresh engine per test: pytest-asyncio gives each test
+    # function its own event loop, but asyncpg connections are bound to the
+    # loop they were created on. A module-level engine (with its pooled,
+    # reused connections) ends up handing test #2 a connection that belongs
+    # to test #1's already-closed loop -> "another operation is in progress".
+    # Creating (and disposing) the engine inside the fixture keeps engine
+    # lifetime == event loop lifetime.
+    engine = create_async_engine(TEST_DATABASE_URL, poolclass=NullPool)
+    session_local = async_sessionmaker(bind=engine, expire_on_commit=False)
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    async with session_local() as session:
+        yield session
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+
+    await engine.dispose()
+
+
+@pytest_asyncio.fixture(scope="function")
+async def client(db_session: AsyncSession) -> AsyncGenerator[AsyncClient, None]:
+    async def override_get_db():
+        yield db_session
+
+    app.dependency_overrides[get_db] = override_get_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        yield ac
+    app.dependency_overrides.clear()
+
+
+@pytest.fixture(scope="module")
+def celery_worker():
+    """
+    A real Celery worker subprocess, for tests that need to prove ingestion
+    actually works end-to-end (Redis broker -> worker process -> DB write),
+    not just that the task function is correct in isolation.
+
+    Started with DATABASE_URL pointed at the test DB explicitly: a subprocess
+    has no access to the in-process `client` fixture's dependency override,
+    so it needs its own, matching env var to read/write the same rows the
+    test's API calls created.
+    """
+    import os
+    import subprocess
+    import tempfile
+    import time
+
+    env = os.environ.copy()
+    env["DATABASE_URL"] = TEST_DATABASE_URL
+    # REDIS_URL deliberately left as-is: the worker must share the same
+    # broker this test process enqueues tasks on via the API.
+
+    # NOTE: deliberately NOT passing --without-heartbeat/--without-gossip
+    # here. They look like reasonable test-speed optimizations, but on at
+    # least one real setup they caused the worker to hang at the "mingle:
+    # searching for neighbors" startup handshake and never reach "ready" —
+    # a slow-sounding failure that was actually a full hang, not slowness.
+    # A manual `celery ... worker --loglevel=info` run (no extra flags)
+    # reached "ready" in ~4s, confirming the flags were the cause, not the
+    # environment. --concurrency=1 is unrelated and kept for test resource
+    # frugality.
+    proc = subprocess.Popen(
+        [
+            "celery",
+            "-A",
+            "app.workers.celery_app",
+            "worker",
+            "--loglevel=info",
+            "--concurrency=1",
+        ],
+        cwd=str(Path(__file__).resolve().parents[1]),
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+
+    started = time.time()
+    ready = False
+    lines: list[str] = []
+    # 60s, not 20s: on some setups (e.g. WSL with the project under
+    # /mnt/c/... — the Windows filesystem mounted into Linux) plain Python
+    # import time alone can take much longer than on a native Linux
+    # filesystem, well past what a tight 20s timeout allows for, with
+    # nothing actually wrong.
+    timeout_seconds = 60
+    while time.time() - started < timeout_seconds:
+        exit_code = proc.poll()
+        if exit_code is not None:
+            # The process already died — waiting out the rest of the
+            # timeout would just be reporting "not ready" for a worker
+            # that crashed on startup (e.g. an import error, or a Celery
+            # config error) seconds ago. Surface that distinctly instead of
+            # a generic timeout, since the fix is completely different
+            # (read the traceback) from "it's just slow."
+            lines.append(f"\n[process exited early with code {exit_code}]\n")
+            break
+
+        line = proc.stdout.readline()
+        if not line:
+            continue
+        lines.append(line)
+        if "ready" in line.lower():
+            ready = True
+            break
+
+    if not ready:
+        proc.terminate()
+        log_path = Path(tempfile.gettempdir()) / "omnirag_celery_worker_test_failure.log"
+        log_path.write_text("".join(lines))
+        raise RuntimeError(
+            "Celery worker did not become ready in time. Full captured output "
+            f"written to {log_path} (terminal output is sometimes truncated):\n\n"
+            + "".join(lines)
+        )
+
+    yield proc
+
+    proc.terminate()
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        proc.kill()
