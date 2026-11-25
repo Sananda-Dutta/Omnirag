@@ -33,6 +33,14 @@ from app.database.session import get_db
 from app.main import app
 from app.models import Base
 
+import os
+
+# Tests must never depend on (or spend quota on) real providers in .env
+os.environ["LLM_PROVIDER"] = "local"
+os.environ["EMBEDDING_PROVIDER"] = "local"
+os.environ["EVAL_PROVIDER"] = "local"
+os.environ["EMBEDDING_DIMENSION"] = "384"
+
 TEST_DATABASE_URL = "postgresql+asyncpg://omnirag:omnirag@localhost:5432/omnirag_test"
 
 

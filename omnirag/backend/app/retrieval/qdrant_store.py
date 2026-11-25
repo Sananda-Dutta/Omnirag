@@ -45,8 +45,8 @@ class DimensionMismatchError(Exception):
 
 
 class QdrantVectorStore(VectorStore):
-    def __init__(self, url: str, collection_name: str):
-        self._client = AsyncQdrantClient(url=url)
+    def __init__(self, url: str, collection_name: str, api_key: str | None = None):
+        self._client = AsyncQdrantClient(url=url, api_key=api_key)
         self._collection = collection_name
 
     async def ensure_collection(self, dimension: int) -> None:

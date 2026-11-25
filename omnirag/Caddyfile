@@ -1,0 +1,24 @@
+{$DOMAIN} {
+	encode gzip
+
+	# Uploads: cap request size so one user can't flood the disk
+	request_body {
+		max_size 30MB
+	}
+
+	# API -> FastAPI. Keeps the /api prefix when forwarding.
+	# If your FastAPI routes do NOT start with /api, change this line to:
+	#   handle_path /api/* {
+	# (handle_path strips the prefix before forwarding)
+	handle /api/* {
+		reverse_proxy backend:8000 {
+			# don't buffer streamed (SSE/token-by-token) chat responses
+			flush_interval -1
+		}
+	}
+
+	# Everything else -> React app
+	handle {
+		reverse_proxy frontend:80
+	}
+}

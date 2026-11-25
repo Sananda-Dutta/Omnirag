@@ -1,0 +1,87 @@
+# Production compose for ONE small EC2 box (Ubuntu + Docker).
+# Postgres lives on Neon and Qdrant on Qdrant Cloud, so they are NOT here.
+# Run from the repo root:
+#   docker compose -f docker-compose.prod.yml up -d --build
+#
+# DATABASE_URL, VECTOR_DB_URL and the Qdrant API key come from backend/.env
+# (see backend.env.prod.example). Only Redis is overridden here because it
+# runs in this compose network.
+
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # noeviction: Celery tasks must never be silently dropped
+    command: redis-server --maxmemory 64mb --maxmemory-policy noeviction
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    expose:
+      - "8000"
+    env_file:
+      - ./backend/.env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - upload_data:/app/uploads
+    command: >
+      sh -c "alembic upgrade head &&
+             uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1
+             --proxy-headers --forwarded-allow-ips='*'"
+
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - ./backend/.env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - upload_data:/app/uploads
+    # concurrency=1: each Celery child is a full Python process (RAM!)
+    command: celery -A app.workers.celery_app worker --loglevel=info --concurrency=1
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    expose:
+      - "80"
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN in .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - backend
+      - frontend
+
+volumes:
+  upload_data:
+  caddy_data:
+  caddy_config:

@@ -52,6 +52,7 @@ class Settings(BaseSettings):
 
     # --- Vector DB (wired up in Phase 6) ---
     VECTOR_DB_URL: str = Field(default="http://localhost:6333")
+    QDRANT_API_KEY: str | None = Field(default=None)
     VECTOR_DB_COLLECTION: str = Field(
         default="document_chunks",
         description="Qdrant collection name. Single collection for all "

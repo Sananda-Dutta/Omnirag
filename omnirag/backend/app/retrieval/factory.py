@@ -15,5 +15,7 @@ from app.retrieval.vector_store import VectorStore
 
 def get_vector_store() -> VectorStore:
     return QdrantVectorStore(
-        url=settings.VECTOR_DB_URL, collection_name=settings.VECTOR_DB_COLLECTION
+        url=settings.VECTOR_DB_URL,
+        collection_name=settings.VECTOR_DB_COLLECTION,
+        api_key=settings.QDRANT_API_KEY,
     )
